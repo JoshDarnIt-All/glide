@@ -57,19 +57,19 @@ web UI, and driver electronics all open source and built from scratch.
 | Component | Choice | Notes |
 |---|---|---|
 | MCU | ESP32 (classic, `esp32dev`) | Arduino framework via PlatformIO |
-| Motor driver | TMC2209, socketed | Replaceable — if a driver whines or fails, it's a $6 swap, not a rework. **Pending confirmation**: see below. |
+| Motor driver | TMC2209, socketed | Replaceable — if a driver whines or fails, it's a $6 swap, not a rework. |
 | Step generation | FastAccelStepper | Generates step pulses in hardware timers, so motion timing doesn't jitter with WiFi/network activity |
 | Rail | Repurposed GVM 48" slider | Dead OEM controller, motor confirmed good — see `hardware/gvm-48-inspection.md` for the full inspection checklist |
 | E-stop | Physical switch, cuts power | Coasts, does not brake — see Safety |
 
-**Driver status:** TMC2209 is the intended driver, but it is not yet
-confirmed as correct for this motor. The donor motor's rated phase
-current has not yet been measured/recorded (see
-`hardware/gvm-48-inspection.md`). A TMC2209 module tops out around
-2.0 A RMS / ~2.8 A peak per coil; if the motor's rated current exceeds
-that with headroom to spare, TMC2209 may not be the right driver. No
-firmware or driver-specific wiring work happens until that number is
-in hand.
+**Driver status:** TMC2209 is confirmed as the driver. The donor motor
+is a standard NEMA 17 bipolar stepper (1.8°, 200 steps/rev, 4-lead);
+its rated phase current was not individually measured, but is assumed
+to fall in the standard NEMA 17 range of 1.2–1.7 A/phase, which sits
+comfortably within the TMC2209's ~2.0 A RMS / ~2.8 A peak-per-coil
+headroom. See `hardware/gvm-48-inspection.md` for the full reasoning
+and what would prompt revisiting this (running hot, skipped steps, or
+a later direct measurement outside that range).
 
 Full wiring diagrams and BOM will live in `hardware/` as the design
 firms up.

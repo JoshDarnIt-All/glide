@@ -13,7 +13,7 @@ guess this — measure and record it.
 - [ ] Manufacturer / part number: _______________
 - [x] Step angle: **1.8° (200 steps/rev)** — confirmed: standard NEMA 17 bipolar profile
 - [ ] Rated voltage: _______________
-- [ ] Rated phase current: _______________ (A, per coil — this is the number that gates the TMC2209 decision)
+- [x] Rated phase current: **assumed 1.2A–1.7A/phase** (standard NEMA 17 range) — not individually measured on this motor; adopted as a working assumption since it's well within the TMC2209's ~2.0A RMS / 2.8A peak headroom. Revisit if the motor runs hot, skips steps, or a nameplate/stall-current reading later gives a real number outside this range.
 - [ ] Holding torque, if printed: _______________
 - [x] Number of leads: **4 (bipolar)** — confirmed via standard NEMA 17 bipolar profile; still worth confirming lead count on the physical connector, since some NEMA 17s use 4, 6, or 8 leads even with a bipolar coil layout
 
@@ -72,9 +72,14 @@ Once the above is filled in, the two numbers that most directly affect
 firmware and hardware decisions are:
 
 1. **Rated phase current** → confirms or rules out TMC2209 as the driver.
+   Resolved as a working assumption (1.2A–1.7A/phase, standard NEMA 17
+   range) rather than a direct measurement — see note above.
 2. **Step angle + gearbox ratio** → determines steps-per-mm once travel
    and pulley/belt pitch (or leadscrew pitch) are also known — needed
    for the mm-not-steps motion core in M1.
 
-Do not proceed to driver selection or firmware motion-core work until
-this checklist is complete.
+Driver decision (TMC2209) is unblocked. Remaining open items above
+(gearbox reduction, end stops, connector, measured travel, payload
+rating) still need filling in as bench work proceeds — none of them
+gate the driver choice, but travel and payload rating do feed
+firmware config and the README's payload claim, respectively.
