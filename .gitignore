@@ -1,0 +1,40 @@
+# --- Secrets: never commit these, no matter what else changes below ---
+secrets.h
+**/secrets.h
+.env
+**/.env
+.env.*
+!.env.example
+
+# --- PlatformIO ---
+.pio/
+.pioenvs/
+.piolibdeps/
+firmware/.pio/
+firmware/.vscode/.browse.c_cpp.db*
+firmware/.vscode/c_cpp_properties.json
+firmware/.vscode/launch.json
+firmware/.vscode/ipch/
+
+# --- Node / Vite (webui) ---
+node_modules/
+webui/dist/
+webui/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Editor / OS cruft ---
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Build artifacts ---
+*.o
+*.bin
+*.elf
+*.map
