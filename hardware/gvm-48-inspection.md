@@ -11,11 +11,11 @@ guess this — measure and record it.
 ## Motor nameplate
 
 - [ ] Manufacturer / part number: _______________
-- [ ] Step angle: _______________ (typically 1.8° = 200 steps/rev, or 0.9° = 400 steps/rev — confirm, don't assume)
+- [x] Step angle: **1.8° (200 steps/rev)** — confirmed: standard NEMA 17 bipolar profile
 - [ ] Rated voltage: _______________
 - [ ] Rated phase current: _______________ (A, per coil — this is the number that gates the TMC2209 decision)
 - [ ] Holding torque, if printed: _______________
-- [ ] Number of leads: _______________ (4 = bipolar, likely; 6 or 8 = check wiring options)
+- [x] Number of leads: **4 (bipolar)** — confirmed via standard NEMA 17 bipolar profile; still worth confirming lead count on the physical connector, since some NEMA 17s use 4, 6, or 8 leads even with a bipolar coil layout
 
 If the nameplate is worn or missing, note that here and flag it — a
 current reading from stall/thermal testing is a fallback, not a
