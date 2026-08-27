@@ -1,4 +1,4 @@
-# Pin Assignment — M0 Bench Rig
+# Pin Assignment & Calibration
 
 TMC2209 driven in **standalone STEP/DIR/EN mode** (decided over UART
 single-wire mode): fewer pins, no extra library, nothing to configure in
@@ -47,3 +47,28 @@ If this driver board is ever swapped (e.g. the "$6 swap" scenario from
 the README), re-measure rather than assuming the same MS1/MS2 wiring —
 different board revisions are exactly what caused the documentation
 conflict in the first place.
+
+## Steps-per-mm — CONFIRMED (measured on the bench, belt+pulley mounted)
+
+Same reasoning as microstepping: the mm<->steps conversion depends on
+the belt pitch and pulley tooth count (and any gearbox reduction),
+none of which are independently known, so this was measured directly
+rather than guessed or derived from an assumed belt/pulley spec.
+
+**Measurement:** with the motor mounted to the slider (belt wrapped
+around its pulley — real drivetrain, not a bare-shaft bench test),
+commanded `JOG 50` at a placeholder `SETSTEPSPERMM 10` (i.e. 500
+actual steps sent). Measured real carriage travel: **5/8" = 15.875mm**.
+
+`R = 500 steps / 15.875mm = 31.496 steps/mm`
+
+**Result: SETSTEPSPERMM 31.496**, set at runtime via the serial
+protocol (this one is intentionally NOT a firmware constant — see the
+comment in `firmware/src/main.cpp` above `g_stepsPerMm` — so it can be
+recalibrated without a rebuild if the drivetrain ever changes).
+
+**Precision note:** 5/8" is a fairly short distance for this kind of
+measurement — a small ruler-reading error is a larger fraction of a
+short move than a long one. This value is usable as-is; re-measuring
+with a longer commanded move (e.g. `JOG 400`) would tighten the
+number further if that precision ever matters.
