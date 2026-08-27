@@ -273,10 +273,16 @@ void startLoopFromCurrentSettings() {
   g_lastLoopPhase = g_loopRunner.phase();
 }
 
-// -1 if not found. Case-sensitive exact match.
+// -1 if not found. Case-INSENSITIVE match -- command verbs are
+// already normalized to uppercase before dispatch (so LOADPRESET,
+// loadpreset, LoadPreset all work identically), but the preset NAME
+// argument wasn't getting the same treatment, which meant a name
+// saved as "Test2" couldn't be recalled by typing "test2" -- a real
+// usability trap, not an intentional strictness. Matching names the
+// same forgiving way the command word already is.
 int findPresetIndex(const String &name) {
   for (size_t i = 0; i < g_presets.size(); ++i) {
-    if (g_presets[i].name == name) return static_cast<int>(i);
+    if (g_presets[i].name.equalsIgnoreCase(name)) return static_cast<int>(i);
   }
   return -1;
 }

@@ -157,10 +157,14 @@ wrong, each is a hard gate.
 | Command | Effect |
 |---|---|
 | `SAVECONFIG` | Persists current travel/calibration + all presets to `/config.json` |
-| `SAVEPRESET <name>` | Saves current A/B/speed/accel/dwell/repeat as a named preset (overwrites if the name exists); persists immediately |
+| `SAVEPRESET <name>` | Saves current A/B/speed/accel/dwell/repeat as a named preset (overwrites if the name exists, case-insensitively); persists immediately |
 | `LOADPRESET <name>` | Recalls a preset and immediately starts moving to it (see design notes above). Errors `ERR NOT_FOUND` if the name doesn't exist |
 | `LISTPRESETS` | Lists all saved presets with their values (`OK NONE` if none saved) |
 | `DELETEPRESET <name>` | Removes a saved preset; persists immediately. Errors `ERR NOT_FOUND` if the name doesn't exist |
+
+Preset names match **case-insensitively** (`test2`, `Test2`, and
+`TEST2` are the same preset) — same as command verbs already do. The
+name's spacing/characters otherwise matter exactly as typed.
 
 ### Query
 
