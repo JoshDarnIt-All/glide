@@ -24,13 +24,13 @@ constexpr uint8_t PIN_EN = 27;  // TMC2209 EN is active-LOW
 // i.e. 200 full steps per revolution.
 constexpr int FULL_STEPS_PER_REV = 200;
 
-// NOT YET CONFIRMED: standalone mode sets microstepping via the
-// TMC2209's physical MS1/MS2 pins, which depends on the specific
-// driver board — unknown until hardware arrives. Defaulting to 1
-// (full step) as the only value that doesn't guess at a board we
-// haven't seen yet. Update this once the board's MS1/MS2 setting is
-// known — see hardware/pinout.md.
-constexpr int MICROSTEPS = 1;
+// Confirmed EMPIRICALLY on the bench, not read off a datasheet: BTT's
+// own manual and schematic for this board disagree with each other on
+// the MS1/MS2 table (see hardware/pinout.md), so a physical
+// measurement was the only trustworthy source. Commanding 2000 pulses
+// (10 rev at the FULL_STEPS_PER_REV=200, MICROSTEPS=1 assumption) produced
+// 1.25 actual shaft revolutions, i.e. R = 10 / 1.25 = 8 microsteps/step.
+constexpr int MICROSTEPS = 8;
 
 constexpr int STEPS_PER_REV = FULL_STEPS_PER_REV * MICROSTEPS;
 

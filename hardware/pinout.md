@@ -23,21 +23,27 @@ no special boot-time role:
 - Avoided: GPIO 34–39 — input-only, can't drive an output signal like
   STEP/DIR/EN.
 
-## Microstepping — NOT YET CONFIRMED
+## Microstepping — CONFIRMED (measured on the bench, not read from a datasheet)
 
 Standalone mode sets microstepping via the TMC2209's MS1/MS2 pins,
-which are typically tied to specific levels by jumpers or fixed
-wiring on the driver breakout board — and the default varies by which
-specific board you end up using. This is not knowable until the board
-is in hand.
+tied to specific levels by jumpers or fixed wiring on the driver
+board. We looked for this in BigTreeTech's own documentation first,
+but their manual and schematic for this exact board
+[disagree with each other](https://github.com/bigtreetech/BIGTREETECH-TMC2209-V1.2/issues/4)
+on the MS1/MS2 truth table, with no resolution in that issue thread —
+so neither document was trustworthy enough to hardcode a value from.
 
-`firmware/src/main.cpp` currently assumes **full-step (1x, no
-microstepping)** as a placeholder — i.e. 200 steps/rev, matching the
-confirmed motor spec directly with no multiplier. This is very likely
-*not* what you'll actually run (microstepping is almost always used in
-practice, for quieter/smoother motion), but it's the only value that
-doesn't require guessing at a specific board's MS1/MS2 default.
+**Measured directly instead:** marked the motor shaft, ran the M0
+bench test with the code's `MICROSTEPS` placeholder set to 1 (i.e.
+commanding 2000 pulses for a nominal "10 revolutions" at
+`FULL_STEPS_PER_REV=200`), and counted the actual physical rotation:
+**1.25 revolutions**. Since each pulse is one microstep, the real
+microstep resolution is `R = 10 / 1.25 = 8`.
 
-**When the driver board arrives:** check its silkscreen/documentation
-for the MS1/MS2 truth table, note the resulting microstep setting here,
-and update `MICROSTEPS` in `firmware/src/main.cpp` to match.
+**Result: MICROSTEPS = 8** (1/8 step), now set in
+`firmware/src/main.cpp`. STEPS_PER_REV is therefore 200 × 8 = 1600.
+
+If this driver board is ever swapped (e.g. the "$6 swap" scenario from
+the README), re-measure rather than assuming the same MS1/MS2 wiring —
+different board revisions are exactly what caused the documentation
+conflict in the first place.
