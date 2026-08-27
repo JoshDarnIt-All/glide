@@ -16,20 +16,31 @@
 // acceleration), not a jerk-limited S-curve. To get true ease in/out
 // anyway, this firmware computes an S-curve profile in lib/motion
 // (pure math, unit-tested on a laptop — see firmware/test/test_motion)
-// and then WAYPOINT-CHASES it: every CONTROL_TICK_MS, it samples the
-// profile's position at the current elapsed time and issues
-// stepper->moveTo() to that exact spot. FastAccelStepper's own ramp is
-// set aggressively fast (see armFollower()) so it always closes each
-// tiny per-tick gap well before the next tick — at that point its
-// built-in ramp is just "keep up with the waypoint," not shaping the
-// move; our S-curve waypoints are what shapes the move. This is a
-// standard technique for tracing an arbitrary velocity profile with a
-// library that only natively supports trapezoidal ramps. Known
-// limitation: because each tick briefly "catches up" to a moving
-// target, the instantaneous step rate can spike slightly above the
-// profile's nominal velocity at that instant — negligible at a 20ms
-// tick rate for smooth profiles in practice, but worth knowing if
-// motion looks anything other than beautiful on real hardware.
+// and every CONTROL_TICK_MS: (1) reads the profile's INSTANTANEOUS
+// VELOCITY at the current elapsed time and sets FastAccelStepper's
+// speed to match it, then (2) issues stepper->moveTo() toward the
+// profile's position at that time, letting FastAccelStepper actually
+// run at close to the real profile speed rather than sprint-and-idle.
+//
+// An earlier version of this file only did (2) — position waypoints,
+// with FastAccelStepper's own speed set to an artificially huge fixed
+// value so it would "sprint" to each 20ms waypoint and then sit idle
+// until the next one. That produced a real, audible burst-then-pause
+// pattern 50 times a second (confirmed on the bench: loud, vibrating
+// motion at SPEED=200 ACCEL=30). Tracking instantaneous velocity
+// instead keeps the stepper continuously moving near the real S-curve
+// speed, so FastAccelStepper's own (trapezoidal) ramp only has to
+// close the small tick-to-tick speed DELTA, not jump from a standing
+// stop to a huge sprint speed every 20ms.
+//
+// This has not been re-verified on hardware yet — it's a reasoned fix
+// for the specific bursting mechanism described above, not a
+// guaranteed cure. If motion still isn't smooth after this, the next
+// levers are: a faster CONTROL_TICK_MS (less time between velocity
+// updates), the TMC2209's StealthChop/SpreadCycle mode jumper (if
+// this board has one — worth checking), or the current trimpot
+// (undercurrent can itself cause vibration/skipping, and it was never
+// individually tuned — see hardware/pinout.md).
 
 #include <Arduino.h>
 #include <FastAccelStepper.h>
@@ -174,16 +185,30 @@ bool requireReady() {
   return requireHomed() && requireTravel() && requireCalibrated();
 }
 
-// Sets FastAccelStepper's own speed/accel high enough that it always
-// closes the gap to the next waypoint well within one control tick —
-// see the file-header note on waypoint-chasing. Scaled off the
-// currently configured peak speed, not a fixed constant, so it stays
-// sane regardless of whatever steps-per-mm calibration ends up being.
-void armFollower() {
-  double nominalStepRate = g_speedMmS * g_stepsPerMm;
-  uint32_t followerHz = static_cast<uint32_t>(nominalStepRate * 3.0) + 1000;
-  stepper->setSpeedInHz(followerHz);
-  stepper->setAcceleration(followerHz * 20);
+// Sets FastAccelStepper's speed to match the S-curve profile's actual
+// instantaneous velocity right now, converted to a step rate via the
+// measured steps-per-mm calibration — see the file-header note on why
+// this replaced the old fixed-huge-speed "sprint to waypoint"
+// approach. Acceleration only needs to close the small tick-to-tick
+// speed DELTA (not jump from zero every tick), so it's set relative
+// to one control tick's worth of time rather than an arbitrary
+// multiplier.
+void applyFollowerVelocity(double instVelocityMmS) {
+  double stepRateHz = fabs(instVelocityMmS) * g_stepsPerMm;
+  // Small floor so FastAccelStepper always has *some* nonzero speed
+  // set (avoids a stall waiting on a literal 0 Hz target) without
+  // meaningfully affecting motion at the near-zero-velocity instants
+  // right at the start/end of a move, which is what true ease in/out
+  // looks like anyway.
+  uint32_t hz = static_cast<uint32_t>(stepRateHz);
+  if (hz < 50) hz = 50;
+  stepper->setSpeedInHz(hz);
+  // Enough acceleration to reach a new tick's speed within about half
+  // a tick period, not an instant jump — this is what actually fixes
+  // the burst-then-pause pattern from the old approach.
+  double tickSeconds = CONTROL_TICK_MS / 1000.0;
+  uint32_t accel = static_cast<uint32_t>(hz / (tickSeconds * 0.5)) + 500;
+  stepper->setAcceleration(accel);
 }
 
 void beginDirectMove(double targetMm) {
@@ -194,7 +219,8 @@ void beginDirectMove(double targetMm) {
       clampedTarget - g_currentPositionMm, g_speedMmS, g_accelMmS2);
   g_directMoveElapsedS = 0.0;
   g_directMoveActive = true;
-  armFollower();
+  // No arm-once call here anymore -- controlTick() sets the follower
+  // speed fresh every tick from the profile's instantaneous velocity.
   if (clamped) {
     printEvent("CLAMPED_TO_SOFT_LIMIT");
   }
@@ -389,7 +415,6 @@ void handleCommand(String line) {
     cfg.dwell_at_b_s = g_dwellBS;
     cfg.repeat = g_repeat;
     g_directMoveActive = false;  // loop takes over position control
-    armFollower();
     g_loopRunner.start(cfg, g_currentPositionMm);
     g_lastLoopPhase = g_loopRunner.phase();
     printOk();
@@ -407,10 +432,12 @@ void handleCommand(String line) {
 
 void controlTick(double dtS) {
   double targetMm = g_currentPositionMm;
+  double instVelocityMmS = 0.0;
   bool haveTarget = false;
 
   if (g_loopRunner.isRunning()) {
     targetMm = g_loopRunner.update(dtS);
+    instVelocityMmS = g_loopRunner.currentVelocity();
     haveTarget = true;
     if (g_loopRunner.phase() != g_lastLoopPhase) {
       printEvent(String("PHASE ") + phaseName(g_loopRunner.phase()));
@@ -420,16 +447,19 @@ void controlTick(double dtS) {
     g_directMoveElapsedS += dtS;
     if (g_directMoveElapsedS >= g_directMoveProfile.duration_s) {
       targetMm = g_directMoveStartMm + g_directMoveProfile.distance_mm;
+      instVelocityMmS = 0.0;  // move is finishing this tick
       g_directMoveActive = false;
     } else {
-      targetMm =
-          g_directMoveStartMm + g_directMoveProfile.positionAt(g_directMoveElapsedS);
+      targetMm = g_directMoveStartMm +
+                 g_directMoveProfile.positionAt(g_directMoveElapsedS);
+      instVelocityMmS = g_directMoveProfile.velocityAt(g_directMoveElapsedS);
     }
     haveTarget = true;
   }
 
   if (haveTarget) {
     g_currentPositionMm = targetMm;
+    applyFollowerVelocity(instVelocityMmS);
     long targetSteps = lround(targetMm * g_stepsPerMm);
     stepper->moveTo(targetSteps);
   }
@@ -458,9 +488,8 @@ void setup() {
     }
   }
   stepper->setDirectionPin(PIN_DIR);
-  // Safe idle defaults before the first real move — armFollower()
-  // overwrites these with move-appropriate values every time a move
-  // or loop actually starts.
+  // Safe idle defaults before the first real move — controlTick()
+  // overwrites these every tick once a move or loop is active.
   stepper->setSpeedInHz(1000);
   stepper->setAcceleration(2000);
 

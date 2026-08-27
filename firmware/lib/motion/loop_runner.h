@@ -53,6 +53,16 @@ class LoopRunner {
   }
   double currentPosition() const { return current_position_mm_; }
 
+  // Instantaneous signed velocity (mm/s) "right now" -- zero during
+  // dwell/idle/stopped, otherwise the S-curve profile's velocity at
+  // the current elapsed time into the active leg. Intended for a
+  // caller that continuously re-targets a stepper driver's speed to
+  // track the real profile instead of commanding position waypoints
+  // alone -- see the note in firmware/src/main.cpp about why that
+  // matters (sprinting to a position waypoint and idling between
+  // ticks produces audible/mechanical bursting, not smooth motion).
+  double currentVelocity() const;
+
   // Halts sequencing immediately: phase becomes Stopped and update()
   // will stop advancing. This does NOT decelerate the physical
   // stepper -- that's the caller's job (e.g. commanding FastAccelStepper

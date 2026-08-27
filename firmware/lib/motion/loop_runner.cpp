@@ -56,6 +56,13 @@ double LoopRunner::update(double dt_s) {
   }
 }
 
+double LoopRunner::currentVelocity() const {
+  if (phase_ == LoopPhase::MovingToB || phase_ == LoopPhase::MovingToA) {
+    return leg_profile_.velocityAt(leg_elapsed_s_);
+  }
+  return 0.0;
+}
+
 void LoopRunner::advancePhaseAfterMove() {
   if (phase_ == LoopPhase::MovingToB) {
     phase_ = LoopPhase::DwellingAtB;

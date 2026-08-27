@@ -179,6 +179,43 @@ void test_loop_single_cycle_stops_at_a() {
   printf("PASS test_loop_single_cycle_stops_at_a (%d ticks)\n", ticks);
 }
 
+void test_loop_current_velocity_matches_profile() {
+  LoopConfig cfg;
+  cfg.pos_a_mm = 0.0;
+  cfg.pos_b_mm = 100.0;
+  cfg.peak_speed_mm_s = 40.0;
+  cfg.max_accel_mm_s2 = 200.0;
+  cfg.dwell_at_a_s = 0.2;
+  cfg.dwell_at_b_s = 0.2;
+  cfg.repeat = true;
+
+  LoopRunner runner;
+  runner.start(cfg, 0.0);
+
+  // Zero velocity at the very start of a move (true ease-in).
+  assert(approxEqual(runner.currentVelocity(), 0.0, 1e-3));
+
+  // Mid-move: velocity should be positive (moving toward B) and
+  // roughly consistent with a plausible speed (not zero, not
+  // absurdly over the configured peak).
+  runner.update(0.5);
+  double vMidMove = runner.currentVelocity();
+  assert(vMidMove > 0.0);
+  assert(vMidMove <= cfg.peak_speed_mm_s * 1.01);
+
+  // Drive it forward until it's dwelling at B; velocity must be
+  // exactly zero during a dwell -- this is the case that mattered for
+  // the real bug (a follower that keeps commanding nonzero speed
+  // during a dwell would just grind against the target forever).
+  for (int i = 0; i < 2000 && runner.phase() != LoopPhase::DwellingAtB; ++i) {
+    runner.update(0.01);
+  }
+  assert(runner.phase() == LoopPhase::DwellingAtB);
+  assert(runner.currentVelocity() == 0.0);
+
+  printf("PASS test_loop_current_velocity_matches_profile\n");
+}
+
 void test_loop_repeat_keeps_cycling() {
   LoopConfig cfg;
   cfg.pos_a_mm = 0.0;
@@ -271,6 +308,7 @@ int main() {
   test_soft_limits_clamps_above_travel();
 
   test_loop_single_cycle_stops_at_a();
+  test_loop_current_velocity_matches_profile();
   test_loop_repeat_keeps_cycling();
   test_loop_stop_halts_immediately();
   test_loop_position_stays_within_ab_bounds();
