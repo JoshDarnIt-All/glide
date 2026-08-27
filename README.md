@@ -108,13 +108,15 @@ one actually works, not just "mostly works."
   controlled over serial only — no WiFi, no web UI yet. This is the
   load-bearing milestone; see the rule below. Full command reference:
   `docs/serial_protocol.md`.
-- **M2 — State machine + JSON config.** Persistent config with a
-  `schema_version` field from day one, so future schema changes (e.g.
-  multi-axis) can be migrated instead of breaking existing configs.
-  This is also where named multi-preset storage (multiple saved
-  loops, not just one active config) belongs — deliberately kept out
-  of M1's serial protocol since it's fundamentally the same
-  persistent/versioned config problem this milestone already solves.
+- **M2 — State machine + JSON config.** Persistent config
+  (`/config.json` on LittleFS) with a `schema_version` field from day
+  one, so future schema changes (e.g. multi-axis) can be migrated
+  instead of breaking existing configs. Axis config (travel,
+  steps-per-mm) and named multi-presets persist across a reboot; home
+  deliberately does not — see `docs/serial_protocol.md` for the full
+  reasoning. Presets support recall-and-go (`LOADPRESET`), the
+  building block for "push a button, slider transitions there"
+  control from Companion/a web GUI in later milestones.
 - **M3 — WiFi provisioning, REST, WebSocket, OTA.** Also: generic-HTTP
   Companion presets, so Companion integration is possible via plain
   HTTP requests even before the dedicated Companion module exists.
@@ -144,6 +146,8 @@ firmware/          PlatformIO project (ESP32, Arduino framework)
   src/              application code — setup/loop, wiring the pieces together
   lib/motion/       ramp + loop math only — no Arduino or WiFi deps,
                     so it can be unit-tested on the laptop, not just on-device
+  lib/config/       config.json persistence (LittleFS + ArduinoJson) —
+                    axis config + named presets, schema_version'd
   lib/api/          REST/WebSocket handlers, once M3 starts
   test/             unit tests for lib/motion (and later lib/api)
 webui/              Vite build; output is gzipped and flashed alongside firmware

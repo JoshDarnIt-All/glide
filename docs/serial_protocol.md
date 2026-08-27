@@ -1,12 +1,12 @@
-# M1 Serial Command Protocol
+# M1/M2 Serial Command Protocol
 
-This is the bench/dev control interface for M1 — typed commands over
-the USB serial connection (115200 baud, see `firmware/platformio.ini`).
-It is **not** the REST/WebSocket API — that's `docs/api.md`, written
-separately before the web UI (M4) or Companion module (M5). This
-protocol only needs to exist through M1/M2; once M3 adds WiFi and a
-real API, this stays as a useful debug interface but stops being the
-primary way to control the device.
+This is the bench/dev control interface for M1 and M2 — typed
+commands over the USB serial connection (115200 baud, see
+`firmware/platformio.ini`). It is **not** the REST/WebSocket API —
+that's `docs/api.md`, written separately before the web UI (M4) or
+Companion module (M5). This protocol only needs to exist through
+M1/M2; once M3 adds WiFi and a real API, this stays as a useful debug
+interface but stops being the primary way to control the device.
 
 ## Design decisions
 
@@ -39,13 +39,51 @@ primary way to control the device.
   assumption of exactly the kind avoided for phase current and
   microstepping elsewhere in this project. Determined by measurement
   instead — see `hardware/pinout.md`.
-- **Named multi-preset storage is explicitly OUT of this protocol.**
-  M2 is already scoped as "state machine + JSON config with
-  `schema_version`," which is what persistent named presets actually
-  need (multiple named `LoopConfig`s, saved to flash, loadable by
-  name, versioned for future migration). Building ad hoc storage into
-  this serial protocol now would mean solving persistence and naming
-  twice.
+- **Named multi-preset storage was deferred to M2** (this doc
+  originally said "out of scope for M1" — M2 has now arrived and this
+  is built: `SAVEPRESET`/`LOADPRESET`/`LISTPRESETS`/`DELETEPRESET`,
+  persisted to `/config.json` on LittleFS via `firmware/lib/config`).
+  This was deliberate: M2 was already scoped as "state machine + JSON
+  config with `schema_version`," which is exactly what persistent
+  named presets need (multiple named configs, saved to flash, loadable
+  by name, versioned for future migration) — building ad hoc storage
+  into M1 would have meant solving persistence and naming twice.
+- **What persists across a reboot and what doesn't** (locked in with
+  Josh during M2 planning): axis config (`SETTRAVEL`, `SETSTEPSPERMM`)
+  and all presets persist automatically. **Home does NOT persist** —
+  `SETHOME` is required fresh every boot regardless of what's in the
+  saved file. Reasoning: travel range and steps-per-mm are fixed
+  physical facts about the hardware (they don't become wrong just
+  because the power cycled), but home is a live reference tied to
+  wherever the carriage physically was at the moment `SETHOME` was
+  called — on this open-loop, no-encoder, no-brake system, there's no
+  way to confirm a saved zero is still physically true after a power
+  cycle. Trusting it blindly risks a preset recall confidently driving
+  the carriage into a hard stop.
+  - A related idea was raised and declined for the same underlying
+    reason: physical limit switches (or TMC2209 StallGuard-based
+    sensorless homing) would let the firmware safely auto-establish
+    home on every boot with no human involvement, avoiding the
+    re-home-every-session friction entirely. Explicitly not pursued
+    for M2 — Josh doesn't want a physical-switch requirement. Worth
+    revisiting later if that friction becomes a real problem in
+    practice.
+  - Saving is **explicit**, not automatic on every `SET*` command:
+    `SAVECONFIG` persists axis config, `SAVEPRESET`/`DELETEPRESET`
+    persist immediately (presets are meant to be durable the instant
+    you act on them). Flash has a finite write-cycle lifespan, and
+    `SETSPEED`/`SETACCEL`/etc. change often during live tuning —
+    auto-saving every one of those would wear flash for no benefit.
+  - `LOADPRESET <name>` doesn't just load values — it immediately
+    starts moving toward the preset (cancelling whatever's currently
+    happening first), matching the "push a button, slider transitions
+    there" workflow this is ultimately being built for (Bitfocus
+    Companion + a web GUI, in M3+). Since `buildSCurveProfile` always
+    computes fresh from wherever the carriage currently is, this is a
+    genuinely smooth transition, not a jump — though since a fresh
+    S-curve always begins at rest, interrupting an in-flight move to
+    recall a different preset means a clean decelerate-then-ease-in,
+    not a mid-flight redirect at the same velocity.
 - **Soft limits are signed** (`SETTRAVEL` accepts negative values).
   Home isn't required to be the minimum-position end of the rail — it's
   just wherever `SETHOME` was called, which depends on where the
@@ -114,15 +152,27 @@ wrong, each is a hard gate.
 |---|---|
 | `LOOPSTART` | Begins A-B-A cycling with current A/B/speed/accel/dwell/repeat config. Errors `ERR A_AND_B_REQUIRED` if either isn't set, `ERR ALREADY_RUNNING` if a loop is already active |
 
+### Persistence (M2)
+
+| Command | Effect |
+|---|---|
+| `SAVECONFIG` | Persists current travel/calibration + all presets to `/config.json` |
+| `SAVEPRESET <name>` | Saves current A/B/speed/accel/dwell/repeat as a named preset (overwrites if the name exists); persists immediately |
+| `LOADPRESET <name>` | Recalls a preset and immediately starts moving to it (see design notes above). Errors `ERR NOT_FOUND` if the name doesn't exist |
+| `LISTPRESETS` | Lists all saved presets with their values (`OK NONE` if none saved) |
+| `DELETEPRESET <name>` | Removes a saved preset; persists immediately. Errors `ERR NOT_FOUND` if the name doesn't exist |
+
 ### Query
 
 | Command | Effect |
 |---|---|
-| `STATUS` | One-line dump: position, phase, homed/travel/calibration state, A/B/speed/accel/dwell/repeat |
+| `STATUS` | One-line dump: position, phase, homed/travel/calibration state, A/B/speed/accel/dwell/repeat, preset count |
 | `HELP` | Lists all commands (also printed by the firmware itself — this doc and the firmware's `printHelp()` should be kept in sync) |
 
-## None of this persists across a reboot
+## What persists across a reboot
 
-There's no flash storage yet (that's M2). Every `SET*` command needs
-re-entering after a power cycle or re-flash. This is expected, not a
-bug, at this milestone.
+See the "What persists" design note above for the full reasoning.
+Short version: axis config (travel, steps-per-mm) and all presets
+survive a power cycle or re-flash, auto-loading from `/config.json` on
+boot. **Home does not** — `SETHOME` is always required fresh, every
+boot, no matter what's saved.

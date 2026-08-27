@@ -1,11 +1,17 @@
-// Glide — M1 motion core (serial control)
+// Glide — M1/M2 motion core (serial control + persistent config)
 //
 // Supersedes the M0 one-shot bench test (which proved the driver,
 // wiring, and microstepping were correct — see hardware/pinout.md).
 // This is the real motion core: homing, soft limits, positions in mm
 // (not raw steps), S-curve ease in/out, and an A-B-A loop, all driven
 // by typed serial commands. Type HELP once connected for the command
-// list; see the project chat/docs for the full protocol design.
+// list; see docs/serial_protocol.md for the full protocol design.
+//
+// M2 addition: axis config (travel/calibration) and named presets
+// persist to /config.json on LittleFS (see firmware/lib/config) and
+// auto-load on boot. Home does NOT persist — SETHOME is required
+// fresh every boot regardless of what's saved. See config_store.h and
+// docs/serial_protocol.md for the reasoning.
 //
 // No WiFi, no web UI yet — that's M3/M4. This is deliberately the
 // "prove the motion itself is beautiful" milestone: don't advance
@@ -44,16 +50,25 @@
 
 #include <Arduino.h>
 #include <FastAccelStepper.h>
+#include <LittleFS.h>
 
+#include <vector>
+
+#include "config_store.h"
 #include "loop_runner.h"
 #include "scurve.h"
 #include "soft_limits.h"
 
+using glide::AxisConfig;
 using glide::buildSCurveProfile;
 using glide::clampToSoftLimits;
+using glide::DeviceConfig;
+using glide::loadConfig;
 using glide::LoopConfig;
 using glide::LoopPhase;
 using glide::LoopRunner;
+using glide::PresetConfig;
+using glide::saveConfig;
 using glide::SCurveProfile;
 
 // ---- Pins (standalone STEP/DIR/EN — see hardware/pinout.md) ----
@@ -117,6 +132,12 @@ bool g_directMoveActive = false;
 SCurveProfile g_directMoveProfile;
 double g_directMoveStartMm = 0.0;
 double g_directMoveElapsedS = 0.0;
+
+// M2: named presets, loaded from /config.json on boot (if present)
+// and saved back on SAVEPRESET/DELETEPRESET. Note g_travelMm and
+// g_stepsPerMm ALSO persist (see config_store.h) but g_homed does
+// NOT -- home is always re-established fresh via SETHOME each boot.
+std::vector<PresetConfig> g_presets;
 
 unsigned long g_lastTickMs = 0;
 String g_lineBuffer;
@@ -226,6 +247,66 @@ void beginDirectMove(double targetMm) {
   }
 }
 
+// Starts (or restarts) the loop using whatever's currently in
+// g_posAMm/g_posBMm/g_speedMmS/etc. Shared by LOOPSTART and
+// LOADPRESET -- LOADPRESET first copies a saved preset's values into
+// those same globals, then calls this, so "recall a preset" and
+// "start the loop" are the same underlying action. Cancels any
+// in-progress direct move or loop first; since buildSCurveProfile
+// always starts from wherever the carriage currently IS (not from A),
+// this naturally produces a smooth transition into the new target
+// rather than a jump -- see loop_runner.h's note on this.
+void startLoopFromCurrentSettings() {
+  if (g_loopRunner.isRunning()) {
+    g_loopRunner.stop();
+  }
+  g_directMoveActive = false;
+  LoopConfig cfg;
+  cfg.pos_a_mm = g_posAMm;
+  cfg.pos_b_mm = g_posBMm;
+  cfg.peak_speed_mm_s = g_speedMmS;
+  cfg.max_accel_mm_s2 = g_accelMmS2;
+  cfg.dwell_at_a_s = g_dwellAS;
+  cfg.dwell_at_b_s = g_dwellBS;
+  cfg.repeat = g_repeat;
+  g_loopRunner.start(cfg, g_currentPositionMm);
+  g_lastLoopPhase = g_loopRunner.phase();
+}
+
+// -1 if not found. Case-sensitive exact match.
+int findPresetIndex(const String &name) {
+  for (size_t i = 0; i < g_presets.size(); ++i) {
+    if (g_presets[i].name == name) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+// Builds the DeviceConfig snapshot that SAVECONFIG/SAVEPRESET/
+// DELETEPRESET all write to flash -- always the full current state
+// (axis config + all presets), since /config.json is one document,
+// not one file per setting.
+DeviceConfig buildDeviceConfigSnapshot() {
+  DeviceConfig config;
+  AxisConfig axis;
+  axis.travel_mm = g_travelMm;
+  axis.steps_per_mm = g_stepsPerMm;
+  config.axes.push_back(axis);
+  config.presets = g_presets;
+  return config;
+}
+
+// Writes the current snapshot to flash, reporting ERR on failure
+// (e.g. filesystem full or not mounted) instead of silently pretending
+// it worked -- callers should NOT printOk() themselves when this
+// returns false.
+bool persistConfig() {
+  if (!saveConfig(buildDeviceConfigSnapshot())) {
+    printErr("SAVE_FAILED");
+    return false;
+  }
+  return true;
+}
+
 void handleStop() {
   if (g_loopRunner.isRunning()) {
     g_loopRunner.stop();
@@ -250,6 +331,11 @@ void printHelp() {
   Serial.println("#   JOG <mm>                    relative move (+/-)");
   Serial.println("#   STOP                        halt any move or loop");
   Serial.println("#   LOOPSTART                   begin A-B-A loop with current config");
+  Serial.println("#   SAVECONFIG                  persist travel/calibration + all presets to flash");
+  Serial.println("#   SAVEPRESET <name>           save current A/B/speed/accel/dwell/repeat as a named preset (persists immediately)");
+  Serial.println("#   LOADPRESET <name>           recall a preset and immediately start moving to it");
+  Serial.println("#   LISTPRESETS                 list all saved presets");
+  Serial.println("#   DELETEPRESET <name>         remove a saved preset (persists immediately)");
   Serial.println("#   STATUS                      report position/phase/config");
   Serial.println("#   HELP                        this list");
   printOk();
@@ -275,6 +361,7 @@ void printStatus() {
   s += " DWELLB=" + String(g_dwellBS, 2);
   s += " REPEAT=";
   s += g_repeat ? "ON" : "OFF";
+  s += " PRESETS=" + String(static_cast<int>(g_presets.size()));
   printOk(s);
 }
 
@@ -411,18 +498,103 @@ void handleCommand(String line) {
       printErr("ALREADY_RUNNING");
       return;
     }
-    LoopConfig cfg;
-    cfg.pos_a_mm = g_posAMm;
-    cfg.pos_b_mm = g_posBMm;
-    cfg.peak_speed_mm_s = g_speedMmS;
-    cfg.max_accel_mm_s2 = g_accelMmS2;
-    cfg.dwell_at_a_s = g_dwellAS;
-    cfg.dwell_at_b_s = g_dwellBS;
-    cfg.repeat = g_repeat;
-    g_directMoveActive = false;  // loop takes over position control
-    g_loopRunner.start(cfg, g_currentPositionMm);
-    g_lastLoopPhase = g_loopRunner.phase();
+    startLoopFromCurrentSettings();
     printOk();
+
+  } else if (verb == "SAVECONFIG") {
+    if (persistConfig()) printOk();
+
+  } else if (verb == "SAVEPRESET") {
+    if (rest.length() == 0) {
+      printErr("USAGE_SAVEPRESET_NAME");
+      return;
+    }
+    PresetConfig preset;
+    preset.name = rest;
+    preset.pos_a_mm = g_posAMm;
+    preset.pos_b_mm = g_posBMm;
+    preset.speed_mm_s = g_speedMmS;
+    preset.accel_mm_s2 = g_accelMmS2;
+    preset.dwell_a_s = g_dwellAS;
+    preset.dwell_b_s = g_dwellBS;
+    preset.repeat = g_repeat;
+    int idx = findPresetIndex(rest);
+    if (idx >= 0) {
+      g_presets[idx] = preset;  // overwrite existing preset of this name
+    } else {
+      g_presets.push_back(preset);
+    }
+    // Presets are meant to be durable the instant you save them --
+    // written to flash immediately, unlike the working SET* values
+    // (SETSPEED etc.), which change often during tuning and would
+    // wear flash needlessly if every one of them auto-saved.
+    if (persistConfig()) printOk();
+
+  } else if (verb == "LOADPRESET") {
+    if (!requireReady()) return;
+    if (rest.length() == 0) {
+      printErr("USAGE_LOADPRESET_NAME");
+      return;
+    }
+    int idx = findPresetIndex(rest);
+    if (idx < 0) {
+      printErr("NOT_FOUND");
+      return;
+    }
+    const PresetConfig &preset = g_presets[idx];
+    bool clampedA = false, clampedB = false;
+    // Re-clamp against CURRENT soft limits -- a preset saved under a
+    // different SETTRAVEL could otherwise recall a position that's no
+    // longer in range.
+    g_posAMm = clampToSoftLimits(preset.pos_a_mm, g_travelMm, &clampedA);
+    g_posBMm = clampToSoftLimits(preset.pos_b_mm, g_travelMm, &clampedB);
+    g_aSet = true;
+    g_bSet = true;
+    g_speedMmS = preset.speed_mm_s;
+    g_accelMmS2 = preset.accel_mm_s2;
+    g_dwellAS = preset.dwell_a_s;
+    g_dwellBS = preset.dwell_b_s;
+    g_repeat = preset.repeat;
+    if (clampedA || clampedB) {
+      printEvent("CLAMPED_TO_SOFT_LIMIT");
+    }
+    // Recall-and-go: immediately starts moving toward the preset,
+    // smoothly transitioning from wherever the carriage currently is
+    // -- see startLoopFromCurrentSettings()'s comment.
+    startLoopFromCurrentSettings();
+    printOk();
+
+  } else if (verb == "LISTPRESETS") {
+    if (g_presets.empty()) {
+      printOk("NONE");
+    } else {
+      for (const PresetConfig &preset : g_presets) {
+        String s = preset.name;
+        s += " A=" + String(preset.pos_a_mm, 2);
+        s += " B=" + String(preset.pos_b_mm, 2);
+        s += " SPEED=" + String(preset.speed_mm_s, 2);
+        s += " ACCEL=" + String(preset.accel_mm_s2, 2);
+        s += " DWELLA=" + String(preset.dwell_a_s, 2);
+        s += " DWELLB=" + String(preset.dwell_b_s, 2);
+        s += " REPEAT=";
+        s += preset.repeat ? "ON" : "OFF";
+        printEvent(s);
+      }
+      printOk();
+    }
+
+  } else if (verb == "DELETEPRESET") {
+    if (rest.length() == 0) {
+      printErr("USAGE_DELETEPRESET_NAME");
+      return;
+    }
+    int idx = findPresetIndex(rest);
+    if (idx < 0) {
+      printErr("NOT_FOUND");
+      return;
+    }
+    g_presets.erase(g_presets.begin() + idx);
+    if (persistConfig()) printOk();
 
   } else if (verb == "STATUS") {
     printStatus();
@@ -475,8 +647,34 @@ void setup() {
   delay(1000);  // let USB-serial enumerate before the first print
 
   Serial.println();
-  Serial.println("=== Glide M1 motion core (serial control) ===");
+  Serial.println("=== Glide M1/M2 motion core (serial control) ===");
   Serial.println("Type HELP for commands.");
+
+  // true = format the filesystem if it's missing/corrupt, which is
+  // the normal case on a brand-new board's very first boot (there's
+  // no config.json yet because LittleFS itself doesn't exist yet).
+  if (!LittleFS.begin(true)) {
+    Serial.println("ERROR: LittleFS mount failed -- presets/config will not persist this session");
+  } else {
+    DeviceConfig loaded;
+    if (loadConfig(loaded) && !loaded.axes.empty()) {
+      g_travelMm = loaded.axes[0].travel_mm;
+      g_stepsPerMm = loaded.axes[0].steps_per_mm;
+      g_travelSet = (g_travelMm != 0.0);
+      g_calibrated = (g_stepsPerMm > 0.0);
+      g_presets = loaded.presets;
+      Serial.printf(
+          "Loaded config.json: TRAVEL=%.1f STEPS_PER_MM=%.3f, %d preset(s)\n",
+          g_travelMm, g_stepsPerMm, static_cast<int>(g_presets.size()));
+    } else {
+      Serial.println(
+          "No usable config.json found -- starting fresh (normal on first "
+          "boot). SETHOME is always required regardless.");
+    }
+  }
+  // Home is NEVER loaded from flash, on purpose -- see config_store.h
+  // and docs/serial_protocol.md. g_homed stays false here no matter
+  // what the file contains.
 
   pinMode(PIN_EN, OUTPUT);
   digitalWrite(PIN_EN, LOW);  // enable driver (active-LOW)
