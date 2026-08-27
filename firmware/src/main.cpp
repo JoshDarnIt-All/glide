@@ -238,7 +238,7 @@ void handleStop() {
 void printHelp() {
   Serial.println("# Commands:");
   Serial.println("#   SETHOME                    mark current position as 0mm");
-  Serial.println("#   SETTRAVEL <mm>              soft-limit travel range [0, mm]");
+  Serial.println("#   SETTRAVEL <mm>              soft-limit travel from home (+ or -)");
   Serial.println("#   SETSTEPSPERMM <value>       steps-per-mm calibration (see hardware/pinout.md)");
   Serial.println("#   SETA [mm]                   mark current pos (or explicit mm) as A");
   Serial.println("#   SETB [mm]                   mark current pos (or explicit mm) as B");
@@ -295,8 +295,13 @@ void handleCommand(String line) {
     printOk();
 
   } else if (verb == "SETTRAVEL") {
+    // Signed on purpose: home isn't required to be the low end of the
+    // rail. SETTRAVEL 500 means "rail extends 500mm positive from
+    // home"; SETTRAVEL -500 means "rail extends 500mm negative from
+    // home" -- whichever matches where you actually homed. Only exactly
+    // zero is rejected (zero usable travel isn't a real range).
     double v = rest.toFloat();
-    if (v <= 0) {
+    if (v == 0) {
       printErr("INVALID_VALUE");
       return;
     }

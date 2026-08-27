@@ -151,6 +151,27 @@ void test_soft_limits_clamps_above_travel() {
   printf("PASS test_soft_limits_clamps_above_travel\n");
 }
 
+// travel_mm can point negative (home is at the far/max end of the
+// rail rather than the near/min end) -- range should be [-500, 0].
+void test_soft_limits_negative_travel_clamps_correctly() {
+  bool clamped = false;
+  double insideNeg = clampToSoftLimits(-250.0, -500.0, &clamped);
+  assert(insideNeg == -250.0);
+  assert(clamped == false);
+
+  clamped = false;
+  double belowRange = clampToSoftLimits(-600.0, -500.0, &clamped);
+  assert(belowRange == -500.0);
+  assert(clamped == true);
+
+  clamped = false;
+  double abovePositive = clampToSoftLimits(10.0, -500.0, &clamped);
+  assert(abovePositive == 0.0);  // 0 (home) is still the other bound
+  assert(clamped == true);
+
+  printf("PASS test_soft_limits_negative_travel_clamps_correctly\n");
+}
+
 // ---------- loop_runner tests ----------
 
 void test_loop_single_cycle_stops_at_a() {
@@ -306,6 +327,7 @@ int main() {
   test_soft_limits_inside_range_unchanged();
   test_soft_limits_clamps_below_zero();
   test_soft_limits_clamps_above_travel();
+  test_soft_limits_negative_travel_clamps_correctly();
 
   test_loop_single_cycle_stops_at_a();
   test_loop_current_velocity_matches_profile();
