@@ -30,14 +30,18 @@ const double kPeakAccelFactor = 10.0 / std::sqrt(3.0);
 
 double SCurveProfile::positionAt(double t_s) const {
   if (duration_s <= 0.0) return 0.0;
-  double t = std::clamp(t_s, 0.0, duration_s);
+  // std::min/std::max instead of std::clamp (C++17) -- see the note
+  // in soft_limits.cpp.
+  double t = std::min(std::max(t_s, 0.0), duration_s);
   double u = t / duration_s;
   return distance_mm * normalizedPosition(u);
 }
 
 double SCurveProfile::velocityAt(double t_s) const {
   if (duration_s <= 0.0) return 0.0;
-  double t = std::clamp(t_s, 0.0, duration_s);
+  // std::min/std::max instead of std::clamp (C++17) -- see the note
+  // in soft_limits.cpp.
+  double t = std::min(std::max(t_s, 0.0), duration_s);
   double u = t / duration_s;
   return (distance_mm / duration_s) * normalizedVelocity(u);
 }
