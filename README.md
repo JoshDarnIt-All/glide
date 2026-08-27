@@ -101,13 +101,20 @@ one actually works, not just "mostly works."
 - **M0 — Bench rig.** Motor turns 10 revolutions, stops, returns.
   Proves the driver, wiring, and basic step/dir control work at all,
   off the rail, before anything else is built on top of it.
-- **M1 — Motion core.** Homing, soft limits, positions in millimeters
-  (not raw steps), ease in/out, A-B-A loop, controlled over serial
-  only — no WiFi, no web UI yet. This is the load-bearing milestone;
-  see the rule below.
+- **M1 — Motion core.** Homing (manual/soft — `SETHOME` marks the
+  current position as 0mm; switch-based auto-homing deferred until
+  the rail's end-stop hardware is confirmed), soft limits, positions
+  in millimeters (not raw steps), S-curve ease in/out, A-B-A loop,
+  controlled over serial only — no WiFi, no web UI yet. This is the
+  load-bearing milestone; see the rule below. Full command reference:
+  `docs/serial_protocol.md`.
 - **M2 — State machine + JSON config.** Persistent config with a
   `schema_version` field from day one, so future schema changes (e.g.
   multi-axis) can be migrated instead of breaking existing configs.
+  This is also where named multi-preset storage (multiple saved
+  loops, not just one active config) belongs — deliberately kept out
+  of M1's serial protocol since it's fundamentally the same
+  persistent/versioned config problem this milestone already solves.
 - **M3 — WiFi provisioning, REST, WebSocket, OTA.** Also: generic-HTTP
   Companion presets, so Companion integration is possible via plain
   HTTP requests even before the dedicated Companion module exists.
@@ -143,6 +150,8 @@ webui/              Vite build; output is gzipped and flashed alongside firmware
 hardware/           wiring diagrams, BOM, CAD, and the donor-rail inspection doc
 docs/api.md         the API contract — written before the web UI or the
                     Companion module consume it
+docs/serial_protocol.md  M1's bench/dev serial command reference —
+                    the debug interface, not the REST/WebSocket API
 .github/workflows/  CI
 ```
 
