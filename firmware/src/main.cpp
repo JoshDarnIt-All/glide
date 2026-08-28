@@ -1,4 +1,5 @@
-// Glide — M1/M2 motion core (serial control + persistent config)
+// Glide — M1/M2/M3 motion core (serial control + persistent config +
+// REST/WebSocket/OTA)
 //
 // Supersedes the M0 one-shot bench test (which proved the driver,
 // wiring, and microstepping were correct — see hardware/pinout.md).
@@ -13,9 +14,14 @@
 // fresh every boot regardless of what's saved. See config_store.h and
 // docs/serial_protocol.md for the reasoning.
 //
-// No WiFi, no web UI yet — that's M3/M4. This is deliberately the
-// "prove the motion itself is beautiful" milestone: don't advance
-// past this file until it is.
+// M3 addition: WiFi (WiFiManager), a REST + WebSocket API
+// (ESPAsyncWebServer, see setupApiRoutes()) and OTA firmware updates
+// (firmware/lib/api/ota_handler). The serial protocol above is
+// untouched and still the primary bench/debug interface -- the
+// network API is "just another input source" layered on top via
+// runCommandForApi(), which runs a REST-originated command through
+// the exact same handleCommand() dispatch. See docs/api.md for the
+// full network contract.
 //
 // --- How S-curve motion is achieved with FastAccelStepper ---
 // FastAccelStepper only has a native TRAPEZOIDAL ramp (constant
@@ -49,15 +55,32 @@
 // individually tuned — see hardware/pinout.md).
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
+#include <ESPAsyncWebServer.h>
 #include <FastAccelStepper.h>
 #include <LittleFS.h>
+#include <WiFi.h>
 
 #include <vector>
 
+#include "command_queue.h"
 #include "config_store.h"
 #include "loop_runner.h"
+#include "ota_handler.h"
 #include "scurve.h"
 #include "soft_limits.h"
+#include "wifi_setup.h"
+
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+#ifndef GLIDE_OTA_KEY
+// No secrets.h (or it didn't define this) -- fall back to a compiled-
+// in default so OTA still works out of the box on a single LAN-only
+// bench device. See firmware/include/secrets.h.example. Loudly warned
+// about at boot in setup() below, not silently accepted.
+#define GLIDE_OTA_KEY "glide-default-ota-key-change-me"
+#endif
 
 using glide::AxisConfig;
 using glide::buildSCurveProfile;
@@ -142,22 +165,98 @@ std::vector<PresetConfig> g_presets;
 unsigned long g_lastTickMs = 0;
 String g_lineBuffer;
 
+// M3: instantaneous velocity, mirroring g_currentPositionMm -- set
+// every controlTick() alongside position, so STATUS/the REST API can
+// report "velocity_mm_s" without re-deriving it. Previously this
+// existed only as controlTick()'s own local instVelocityMmS and was
+// never exposed anywhere.
+double g_currentVelocityMmS = 0.0;
+
+// M3: name of the preset currently "live" -- set on a successful
+// LOADPRESET, cleared the instant any parameter/move happens after
+// that isn't itself a fresh preset load (clear-on-divergence; see
+// docs/api.md's active_preset field and docs/m4_ui_plan.md's "active
+// preset chip"). Empty string means "no preset is active."
+String g_activePresetName;
+
+// M3: REST + WebSocket network API. See firmware/lib/api for the
+// reusable pieces (CommandQueue, WiFi/mDNS setup, OTA upload handling)
+// and docs/api.md for the full contract these routes implement.
+AsyncWebServer g_apiServer(80);
+AsyncWebSocket g_apiWs("/ws");
+glide::CommandQueue g_apiQueue;
+unsigned long g_lastWsStatusMs = 0;
+unsigned long g_lastWsHeartbeatMs = 0;
+
 // ---- Serial reply helpers ----
 // OK/ERR for direct command replies, "# " for asynchronous events
 // (like a loop phase changing) so they're visually distinct from a
 // reply to whatever you just typed.
-void printOk() { Serial.println("OK"); }
+//
+// M3 addition: a REST handler needs handleCommand()'s OK/ERR outcome
+// as DATA (to turn into an HTTP status + JSON body), not a serial
+// print. Rather than duplicate every command's branch logic for the
+// network path, these helpers also capture the outcome into
+// g_captured* whenever g_capturingReply is set (see
+// runCommandForApi() below) -- Serial still gets the print either way,
+// so watching the bench monitor shows network-originated commands too.
+bool g_capturingReply = false;
+bool g_capturedOk = false;
+String g_capturedDetail;
+
+void printOk() {
+  Serial.println("OK");
+  if (g_capturingReply) {
+    g_capturedOk = true;
+    g_capturedDetail = "";
+  }
+}
 void printOk(const String &data) {
   Serial.print("OK ");
   Serial.println(data);
+  if (g_capturingReply) {
+    g_capturedOk = true;
+    g_capturedDetail = data;
+  }
 }
 void printErr(const char *reason) {
   Serial.print("ERR ");
   Serial.println(reason);
+  if (g_capturingReply) {
+    g_capturedOk = false;
+    g_capturedDetail = reason;
+  }
 }
 void printEvent(const String &msg) {
   Serial.print("# ");
   Serial.println(msg);
+}
+
+// Forward declarations -- handleCommand() is the main serial dispatch
+// (defined much further down, after all the other handler helpers),
+// and wsBroadcastEvent() lives with the other M3 JSON/WebSocket
+// helpers just after printStatus() -- both are needed by functions
+// defined earlier in the file than they are.
+void handleCommand(String line);
+void wsBroadcastEvent(const char *event, const String &extraJson = "");
+
+// Runs `line` through the exact same handleCommand() dispatch serial
+// commands use, capturing its OK/ERR outcome as data instead of
+// letting it only go to Serial. This is THE mechanism that makes REST
+// "just another input source" rather than a second control path (see
+// docs/api.md's architecture section) -- every mutating REST endpoint
+// below ultimately calls this with a serial-equivalent command string.
+struct CommandResult {
+  bool ok = false;
+  String detail;  // "" for a bare OK, or the ERR reason
+};
+CommandResult runCommandForApi(const String &line) {
+  g_capturingReply = true;
+  g_capturedOk = false;
+  g_capturedDetail = "";
+  handleCommand(line);
+  g_capturingReply = false;
+  return CommandResult{g_capturedOk, g_capturedDetail};
 }
 
 const char *phaseName(LoopPhase p) {
@@ -176,6 +275,30 @@ const char *phaseName(LoopPhase p) {
       return "STOPPED";
   }
   return "UNKNOWN";
+}
+
+// True if anything is actively controlling the stepper right now -- a
+// direct MOVETO/JOG move, or the A-B-A loop (moving OR dwelling; only
+// Idle/Stopped count as "not active"). A direct move and the loop are
+// two separate state machines layered over the same stepper, so
+// neither one alone answers "is the carriage doing something."
+bool isActive() { return g_directMoveActive || g_loopRunner.isRunning(); }
+
+// Unified phase for anything external (STATUS today; the M3 REST/
+// WebSocket API next) that needs "what is the carriage doing right
+// now" -- IDLE, MOVING, MOVING_TO_A, MOVING_TO_B, DWELLING_AT_A,
+// DWELLING_AT_B, STOPPED (see docs/api.md's phase enum). Before this
+// fix, printStatus() reported PHASE=IDLE whenever the A-B-A loop
+// wasn't running -- even mid a plain MOVETO/JOG -- and separately
+// collapsed the loop's own Stopped state back to IDLE too, since
+// isRunning() is false once stopped and the old ternary gated
+// phaseName() behind it. This restores both distinctions instead of
+// checking isRunning() at all.
+const char *reportedPhaseName() {
+  if (g_directMoveActive) {
+    return "MOVING";
+  }
+  return phaseName(g_loopRunner.phase());
 }
 
 bool requireHomed() {
@@ -244,6 +367,7 @@ void beginDirectMove(double targetMm) {
   // speed fresh every tick from the profile's instantaneous velocity.
   if (clamped) {
     printEvent("CLAMPED_TO_SOFT_LIMIT");
+    wsBroadcastEvent("clamped_to_soft_limit");
   }
 }
 
@@ -367,7 +491,7 @@ void printHelp() {
 void printStatus() {
   String s = "POS=" + String(g_currentPositionMm, 3);
   s += " PHASE=";
-  s += g_loopRunner.isRunning() ? phaseName(g_loopRunner.phase()) : "IDLE";
+  s += reportedPhaseName();
   s += " HOMED=";
   s += g_homed ? "Y" : "N";
   s += " TRAVEL=";
@@ -386,6 +510,161 @@ void printStatus() {
   s += g_repeat ? "ON" : "OFF";
   s += " PRESETS=" + String(static_cast<int>(g_presets.size()));
   printOk(s);
+}
+
+// ---- M3: JSON builders shared by REST responses and the WebSocket
+// status push -- see docs/api.md for the exact response shapes these
+// match. All run from loop()'s own thread (queued via g_apiQueue for
+// REST; called directly from loop()/controlTick() for the WebSocket
+// push), same as every other read of these globals.
+String buildStatusJson() {
+  JsonDocument doc;
+  doc["position_mm"] = g_currentPositionMm;
+  doc["velocity_mm_s"] = g_currentVelocityMmS;
+  doc["phase"] = reportedPhaseName();
+  doc["homed"] = g_homed;
+  doc["travel_set"] = g_travelSet;
+  doc["calibrated"] = g_calibrated;
+  doc["travel_mm"] = g_travelMm;
+  if (g_activePresetName.length()) {
+    doc["active_preset"] = g_activePresetName;
+  } else {
+    doc["active_preset"] = nullptr;
+  }
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+String buildAxisJson() {
+  JsonDocument doc;
+  doc["travel_mm"] = g_travelMm;
+  doc["steps_per_mm"] = g_stepsPerMm;
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+String buildLoopConfigJson() {
+  JsonDocument doc;
+  doc["pos_a_mm"] = g_posAMm;
+  doc["pos_b_mm"] = g_posBMm;
+  doc["speed_mm_s"] = g_speedMmS;
+  doc["accel_mm_s2"] = g_accelMmS2;
+  doc["dwell_a_s"] = g_dwellAS;
+  doc["dwell_b_s"] = g_dwellBS;
+  doc["repeat"] = g_repeat;
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+void presetToJson(const PresetConfig &preset, JsonObject obj) {
+  obj["name"] = preset.name;
+  obj["pos_a_mm"] = preset.pos_a_mm;
+  obj["pos_b_mm"] = preset.pos_b_mm;
+  obj["speed_mm_s"] = preset.speed_mm_s;
+  obj["accel_mm_s2"] = preset.accel_mm_s2;
+  obj["dwell_a_s"] = preset.dwell_a_s;
+  obj["dwell_b_s"] = preset.dwell_b_s;
+  obj["repeat"] = preset.repeat;
+}
+
+String buildPresetsJson() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (const PresetConfig &preset : g_presets) {
+    presetToJson(preset, arr.add<JsonObject>());
+  }
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+String buildSinglePresetJson(const PresetConfig &preset) {
+  JsonDocument doc;
+  presetToJson(preset, doc.to<JsonObject>());
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+String buildWifiJson() {
+  JsonDocument doc;
+  doc["ssid"] = WiFi.SSID();
+  doc["rssi"] = WiFi.RSSI();
+  doc["ip"] = WiFi.localIP().toString();
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+// Maps a serial-style ERR reason to the HTTP status docs/api.md's
+// error table specifies for it.
+int httpStatusForError(const String &err) {
+  if (err == "NOT_HOMED" || err == "TRAVEL_NOT_SET" ||
+      err == "NOT_CALIBRATED" || err == "ALREADY_RUNNING" ||
+      err == "MOVING" || err == "OTA_IN_PROGRESS") {
+    return 409;
+  }
+  if (err == "NOT_FOUND") return 404;
+  if (err == "UNAUTHORIZED") return 401;
+  return 400;  // INVALID_VALUE and anything unexpected
+}
+
+void sendCommandResult(AsyncWebServerRequest *request,
+                        const CommandResult &result) {
+  if (result.ok) {
+    request->send(200, "application/json", "{\"ok\":true}");
+  } else {
+    request->send(httpStatusForError(result.detail), "application/json",
+                  "{\"error\":\"" + result.detail + "\"}");
+  }
+}
+
+// Queues `job` to run on loop()'s own thread (see
+// firmware/lib/api/command_queue.h) instead of directly on
+// AsyncTCP's task -- every REST/WebSocket handler in this file goes
+// through this, so none of them ever touches a motion global directly.
+void enqueueApiJob(std::function<void()> job) {
+  g_apiQueue.push(std::move(job));
+}
+
+// One WebSocket frame type -- see docs/api.md's WebSocket section.
+// Skips building/serializing anything if nobody's listening.
+void wsBroadcastEvent(const char *event, const String &extraJson) {
+  if (g_apiWs.count() == 0) return;
+  String out = String("{\"type\":\"event\",\"event\":\"") + event + "\"";
+  if (extraJson.length()) {
+    out += "," + extraJson;
+  }
+  out += "}";
+  g_apiWs.textAll(out);
+}
+
+void wsBroadcastStatus() {
+  if (g_apiWs.count() == 0) return;
+  // buildStatusJson() returns a plain status object; the WebSocket
+  // frame needs the same fields plus "type":"status" -- rebuilding
+  // via the same JsonDocument fields (rather than string-surgery on
+  // buildStatusJson()'s output) keeps this from silently drifting out
+  // of sync with the REST GET /status shape.
+  JsonDocument doc;
+  doc["type"] = "status";
+  doc["position_mm"] = g_currentPositionMm;
+  doc["velocity_mm_s"] = g_currentVelocityMmS;
+  doc["phase"] = reportedPhaseName();
+  doc["homed"] = g_homed;
+  doc["travel_set"] = g_travelSet;
+  doc["calibrated"] = g_calibrated;
+  if (g_activePresetName.length()) {
+    doc["active_preset"] = g_activePresetName;
+  } else {
+    doc["active_preset"] = nullptr;
+  }
+  String out;
+  serializeJson(doc, out);
+  g_apiWs.textAll(out);
 }
 
 void handleCommand(String line) {
@@ -441,7 +720,11 @@ void handleCommand(String line) {
       g_posBMm = clampedV;
       g_bSet = true;
     }
-    if (clamped) printEvent("CLAMPED_TO_SOFT_LIMIT");
+    g_activePresetName = "";  // manual A/B change diverges from any loaded preset
+    if (clamped) {
+      printEvent("CLAMPED_TO_SOFT_LIMIT");
+      wsBroadcastEvent("clamped_to_soft_limit");
+    }
     printOk();
 
   } else if (verb == "SETSPEED") {
@@ -451,6 +734,7 @@ void handleCommand(String line) {
       return;
     }
     g_speedMmS = v;
+    g_activePresetName = "";
     printOk();
 
   } else if (verb == "SETACCEL") {
@@ -460,6 +744,7 @@ void handleCommand(String line) {
       return;
     }
     g_accelMmS2 = v;
+    g_activePresetName = "";
     printOk();
 
   } else if (verb == "SETDWELL") {
@@ -483,6 +768,7 @@ void handleCommand(String line) {
       printErr("USAGE_SETDWELL_A_OR_B_SECONDS");
       return;
     }
+    g_activePresetName = "";
     printOk();
 
   } else if (verb == "SETREPEAT") {
@@ -496,16 +782,41 @@ void handleCommand(String line) {
       printErr("USAGE_SETREPEAT_ON_OR_OFF");
       return;
     }
+    g_activePresetName = "";
     printOk();
 
   } else if (verb == "MOVETO") {
     if (!requireReady()) return;
+    if (glide::otaInProgress()) {
+      printErr("OTA_IN_PROGRESS");
+      return;
+    }
+    // Reject rather than silently no-op: before this check existed, a
+    // MOVETO issued while the A-B-A loop was running set
+    // g_directMoveActive true, but controlTick()'s loop-takes-priority
+    // branch meant it was never actually acted on -- the command
+    // replied OK and nothing happened. Matches docs/api.md's `409
+    // MOVING` contract for the REST equivalent.
+    if (isActive()) {
+      printErr("MOVING");
+      return;
+    }
     beginDirectMove(rest.toFloat());
+    g_activePresetName = "";  // manual move diverges from any loaded preset
     printOk();
 
   } else if (verb == "JOG") {
     if (!requireReady()) return;
+    if (glide::otaInProgress()) {
+      printErr("OTA_IN_PROGRESS");
+      return;
+    }
+    if (isActive()) {
+      printErr("MOVING");
+      return;
+    }
     beginDirectMove(g_currentPositionMm + rest.toFloat());
+    g_activePresetName = "";
     printOk();
 
   } else if (verb == "STOP") {
@@ -513,6 +824,10 @@ void handleCommand(String line) {
 
   } else if (verb == "LOOPSTART") {
     if (!requireReady()) return;
+    if (glide::otaInProgress()) {
+      printErr("OTA_IN_PROGRESS");
+      return;
+    }
     if (!g_aSet || !g_bSet) {
       printErr("A_AND_B_REQUIRED");
       return;
@@ -560,6 +875,10 @@ void handleCommand(String line) {
 
   } else if (verb == "LOADPRESET") {
     if (!requireReady()) return;
+    if (glide::otaInProgress()) {
+      printErr("OTA_IN_PROGRESS");
+      return;
+    }
     if (rest.length() == 0) {
       printErr("USAGE_LOADPRESET_NAME");
       return;
@@ -590,11 +909,17 @@ void handleCommand(String line) {
     g_repeat = preset.repeat;
     if (clampedA || clampedB) {
       printEvent("CLAMPED_TO_SOFT_LIMIT");
+      wsBroadcastEvent("clamped_to_soft_limit");
     }
+    // Use the preset's own stored (already-sanitized) name, not the
+    // raw typed argument -- LOADPRESET matches case-insensitively, so
+    // "test2" and the stored "Test2" would otherwise disagree here.
+    g_activePresetName = preset.name;
     // Recall-and-go: immediately starts moving toward the preset,
     // smoothly transitioning from wherever the carriage currently is
     // -- see startLoopFromCurrentSettings()'s comment.
     startLoopFromCurrentSettings();
+    wsBroadcastEvent("preset_loaded", "\"name\":\"" + preset.name + "\"");
     printOk();
 
   } else if (verb == "LISTPRESETS") {
@@ -634,6 +959,12 @@ void handleCommand(String line) {
       printErr("NOT_FOUND");
       return;
     }
+    // Deleting the preset that's currently "active" leaves nothing for
+    // that name to still refer to -- clear it rather than leave a
+    // stale reference to a preset that no longer exists.
+    if (g_presets[idx].name.equalsIgnoreCase(g_activePresetName)) {
+      g_activePresetName = "";
+    }
     g_presets.erase(g_presets.begin() + idx);
     if (persistConfig()) printOk();
 
@@ -659,6 +990,9 @@ void controlTick(double dtS) {
     haveTarget = true;
     if (g_loopRunner.phase() != g_lastLoopPhase) {
       printEvent(String("PHASE ") + phaseName(g_loopRunner.phase()));
+      wsBroadcastEvent(
+          "phase_change",
+          String("\"phase\":\"") + phaseName(g_loopRunner.phase()) + "\"");
       g_lastLoopPhase = g_loopRunner.phase();
     }
   } else if (g_directMoveActive) {
@@ -675,6 +1009,11 @@ void controlTick(double dtS) {
     haveTarget = true;
   }
 
+  // Mirrors g_currentPositionMm regardless of haveTarget, so a caller
+  // (STATUS, the REST API) sees a real 0 once motion actually stops,
+  // not a stale nonzero value from the last active tick.
+  g_currentVelocityMmS = haveTarget ? instVelocityMmS : 0.0;
+
   if (haveTarget) {
     g_currentPositionMm = targetMm;
     applyFollowerVelocity(instVelocityMmS);
@@ -683,13 +1022,343 @@ void controlTick(double dtS) {
   }
 }
 
+// ---- M3: REST + WebSocket route registration ----
+// Every handler below does the minimum possible work on AsyncTCP's own
+// task (parse the request into plain values) and defers everything
+// else -- reading/writing motion state, building the response body,
+// calling request->send() -- into a job pushed onto g_apiQueue and run
+// from loop() (see enqueueApiJob()/CommandQueue). See docs/api.md for
+// the full endpoint table these implement.
+//
+// The PATCH/PUT/POST-with-body routes use `new
+// AsyncCallbackJsonWebHandler(uri, callback)` + `handler->setMethod(...)`
+// + `server.addHandler(handler)` to get a parsed JsonVariant for a
+// JSON request body. Like the regex routes noted below, this is
+// written from established knowledge of ESPAsyncWebServer's long-
+// stable API and wasn't compile-verified in this environment -- worth
+// a look on the first real build if these don't compile.
+void handleWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
+                    AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    Serial.printf("WebSocket client #%u connected\n", client->id());
+  } else if (type == WS_EVT_DISCONNECT) {
+    Serial.printf("WebSocket client #%u disconnected\n", client->id());
+  }
+  // No incoming WS commands to handle -- everything that mutates state
+  // goes over REST (see docs/api.md), so WS_EVT_DATA is deliberately
+  // ignored here.
+}
+
+void setupApiRoutes() {
+  g_apiWs.onEvent(handleWsEvent);
+  g_apiServer.addHandler(&g_apiWs);
+
+  g_apiServer.on("/api/v1/home", HTTP_POST, [](AsyncWebServerRequest *request) {
+    enqueueApiJob([request]() {
+      sendCommandResult(request, runCommandForApi("SETHOME"));
+    });
+  });
+
+  g_apiServer.on("/api/v1/axis", HTTP_GET, [](AsyncWebServerRequest *request) {
+    enqueueApiJob(
+        [request]() { request->send(200, "application/json", buildAxisJson()); });
+  });
+
+  {
+    auto *handler = new AsyncCallbackJsonWebHandler(
+        "/api/v1/axis", [](AsyncWebServerRequest *request, JsonVariant &json) {
+          JsonObject body = json.as<JsonObject>();
+          bool hasTravel = body["travel_mm"].is<double>();
+          bool hasSteps = body["steps_per_mm"].is<double>();
+          double travel = hasTravel ? body["travel_mm"].as<double>() : 0.0;
+          double steps = hasSteps ? body["steps_per_mm"].as<double>() : 0.0;
+          enqueueApiJob([=]() {
+            CommandResult result{true, ""};
+            if (hasTravel) {
+              result = runCommandForApi("SETTRAVEL " + String(travel, 3));
+            }
+            if (result.ok && hasSteps) {
+              result = runCommandForApi("SETSTEPSPERMM " + String(steps, 6));
+            }
+            sendCommandResult(request, result);
+          });
+        });
+    handler->setMethod(HTTP_PATCH);
+    g_apiServer.addHandler(handler);
+  }
+
+  g_apiServer.on("/api/v1/loop-config", HTTP_GET,
+                 [](AsyncWebServerRequest *request) {
+                   enqueueApiJob([request]() {
+                     request->send(200, "application/json", buildLoopConfigJson());
+                   });
+                 });
+
+  {
+    auto *handler = new AsyncCallbackJsonWebHandler(
+        "/api/v1/loop-config",
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+          JsonObject body = json.as<JsonObject>();
+          bool hasA = body["pos_a_mm"].is<double>();
+          bool hasB = body["pos_b_mm"].is<double>();
+          bool hasSpeed = body["speed_mm_s"].is<double>();
+          bool hasAccel = body["accel_mm_s2"].is<double>();
+          bool hasDwellA = body["dwell_a_s"].is<double>();
+          bool hasDwellB = body["dwell_b_s"].is<double>();
+          bool hasRepeat = body["repeat"].is<bool>();
+          double a = hasA ? body["pos_a_mm"].as<double>() : 0.0;
+          double b = hasB ? body["pos_b_mm"].as<double>() : 0.0;
+          double speed = hasSpeed ? body["speed_mm_s"].as<double>() : 0.0;
+          double accel = hasAccel ? body["accel_mm_s2"].as<double>() : 0.0;
+          double dwellA = hasDwellA ? body["dwell_a_s"].as<double>() : 0.0;
+          double dwellB = hasDwellB ? body["dwell_b_s"].as<double>() : 0.0;
+          bool repeat = hasRepeat ? body["repeat"].as<bool>() : false;
+          // Applied in a fixed order so a request that sets several
+          // fields at once has a predictable outcome if one of them
+          // is invalid partway through (earlier fields already took
+          // effect; later ones don't) -- matches how a client sending
+          // these as separate serial commands one at a time would
+          // behave anyway.
+          enqueueApiJob([=]() {
+            CommandResult result{true, ""};
+            if (result.ok && hasA) result = runCommandForApi("SETA " + String(a, 3));
+            if (result.ok && hasB) result = runCommandForApi("SETB " + String(b, 3));
+            if (result.ok && hasSpeed)
+              result = runCommandForApi("SETSPEED " + String(speed, 3));
+            if (result.ok && hasAccel)
+              result = runCommandForApi("SETACCEL " + String(accel, 3));
+            if (result.ok && hasDwellA)
+              result = runCommandForApi("SETDWELL A " + String(dwellA, 3));
+            if (result.ok && hasDwellB)
+              result = runCommandForApi("SETDWELL B " + String(dwellB, 3));
+            if (result.ok && hasRepeat)
+              result = runCommandForApi(String("SETREPEAT ") +
+                                        (repeat ? "ON" : "OFF"));
+            sendCommandResult(request, result);
+          });
+        });
+    handler->setMethod(HTTP_PATCH);
+    g_apiServer.addHandler(handler);
+  }
+
+  g_apiServer.on("/api/v1/loop-config/mark-a", HTTP_POST,
+                 [](AsyncWebServerRequest *request) {
+                   enqueueApiJob([request]() {
+                     sendCommandResult(request, runCommandForApi("SETA"));
+                   });
+                 });
+  g_apiServer.on("/api/v1/loop-config/mark-b", HTTP_POST,
+                 [](AsyncWebServerRequest *request) {
+                   enqueueApiJob([request]() {
+                     sendCommandResult(request, runCommandForApi("SETB"));
+                   });
+                 });
+
+  {
+    auto *handler = new AsyncCallbackJsonWebHandler(
+        "/api/v1/move", [](AsyncWebServerRequest *request, JsonVariant &json) {
+          double posMm = json["pos_mm"] | 0.0;
+          enqueueApiJob([=]() {
+            sendCommandResult(request,
+                              runCommandForApi("MOVETO " + String(posMm, 3)));
+          });
+        });
+    handler->setMethod(HTTP_POST);
+    g_apiServer.addHandler(handler);
+  }
+
+  {
+    auto *handler = new AsyncCallbackJsonWebHandler(
+        "/api/v1/jog", [](AsyncWebServerRequest *request, JsonVariant &json) {
+          double deltaMm = json["delta_mm"] | 0.0;
+          enqueueApiJob([=]() {
+            sendCommandResult(request,
+                              runCommandForApi("JOG " + String(deltaMm, 3)));
+          });
+        });
+    handler->setMethod(HTTP_POST);
+    g_apiServer.addHandler(handler);
+  }
+
+  g_apiServer.on("/api/v1/stop", HTTP_POST, [](AsyncWebServerRequest *request) {
+    enqueueApiJob(
+        [request]() { sendCommandResult(request, runCommandForApi("STOP")); });
+  });
+
+  g_apiServer.on("/api/v1/loop/start", HTTP_POST,
+                 [](AsyncWebServerRequest *request) {
+                   enqueueApiJob([request]() {
+                     sendCommandResult(request, runCommandForApi("LOOPSTART"));
+                   });
+                 });
+
+  g_apiServer.on("/api/v1/presets", HTTP_GET, [](AsyncWebServerRequest *request) {
+    enqueueApiJob(
+        [request]() { request->send(200, "application/json", buildPresetsJson()); });
+  });
+
+  g_apiServer.on("/api/v1/config/save", HTTP_POST,
+                 [](AsyncWebServerRequest *request) {
+                   enqueueApiJob([request]() {
+                     sendCommandResult(request, runCommandForApi("SAVECONFIG"));
+                   });
+                 });
+
+  g_apiServer.on("/api/v1/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    enqueueApiJob(
+        [request]() { request->send(200, "application/json", buildStatusJson()); });
+  });
+
+  g_apiServer.on("/api/v1/wifi", HTTP_GET, [](AsyncWebServerRequest *request) {
+    enqueueApiJob(
+        [request]() { request->send(200, "application/json", buildWifiJson()); });
+  });
+
+  // ---- Preset-name-parameterized routes ----
+  // Matched with ESPAsyncWebServer's regex URL support ("^...$" pattern
+  // + request->pathArg(0) for the captured name), enabled by the
+  // -DASYNCWEBSERVER_REGEX build flag in platformio.ini. This is the
+  // one part of this file relying on a library feature that couldn't
+  // be compile-verified in this environment (no ESP32 toolchain here)
+  // -- if these routes fail to compile or never match on the first
+  // real build, that flag/feature is the first thing to check.
+  static const char *kPresetNamePattern = "^\\/api\\/v1\\/presets\\/([^\\/]+)$";
+  static const char *kPresetSaveCurrentPattern =
+      "^\\/api\\/v1\\/presets\\/([^\\/]+)\\/save-current$";
+  static const char *kPresetLoadPattern =
+      "^\\/api\\/v1\\/presets\\/([^\\/]+)\\/load$";
+
+  g_apiServer.on(kPresetNamePattern, HTTP_GET, [](AsyncWebServerRequest *request) {
+    String name = request->pathArg(0);
+    enqueueApiJob([request, name]() {
+      int idx = findPresetIndex(name);
+      if (idx < 0) {
+        request->send(404, "application/json", "{\"error\":\"NOT_FOUND\"}");
+        return;
+      }
+      request->send(200, "application/json", buildSinglePresetJson(g_presets[idx]));
+    });
+  });
+
+  g_apiServer.on(kPresetNamePattern, HTTP_DELETE,
+                 [](AsyncWebServerRequest *request) {
+                   String name = request->pathArg(0);
+                   enqueueApiJob([request, name]() {
+                     sendCommandResult(request,
+                                       runCommandForApi("DELETEPRESET " + name));
+                   });
+                 });
+
+  {
+    auto *handler = new AsyncCallbackJsonWebHandler(
+        kPresetNamePattern,
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+          String name = request->pathArg(0);
+          JsonObject body = json.as<JsonObject>();
+          // Explicit body values, NOT "snapshot current settings" --
+          // see docs/api.md: PUT /presets/:name creates/overwrites
+          // with exactly what's in the request body, unlike
+          // SAVEPRESET/save-current which snapshots live A/B/speed.
+          bool hasA = body["pos_a_mm"].is<double>();
+          bool hasB = body["pos_b_mm"].is<double>();
+          double posA = body["pos_a_mm"] | 0.0;
+          double posB = body["pos_b_mm"] | 0.0;
+          double speed = body["speed_mm_s"] | 20.0;
+          double accel = body["accel_mm_s2"] | 100.0;
+          double dwellA = body["dwell_a_s"] | 0.0;
+          double dwellB = body["dwell_b_s"] | 0.0;
+          bool repeat = body["repeat"] | true;
+          enqueueApiJob([=]() {
+            if (!hasA || !hasB) {
+              request->send(400, "application/json",
+                            "{\"error\":\"INVALID_VALUE\"}");
+              return;
+            }
+            PresetConfig preset;
+            preset.name = sanitizePresetName(name);
+            preset.pos_a_mm = posA;
+            preset.pos_b_mm = posB;
+            preset.speed_mm_s = speed;
+            preset.accel_mm_s2 = accel;
+            preset.dwell_a_s = dwellA;
+            preset.dwell_b_s = dwellB;
+            preset.repeat = repeat;
+            int idx = findPresetIndex(preset.name);
+            if (idx >= 0) {
+              g_presets[idx] = preset;
+            } else {
+              g_presets.push_back(preset);
+            }
+            if (persistConfig()) {
+              request->send(200, "application/json", "{\"ok\":true}");
+            } else {
+              request->send(500, "application/json",
+                            "{\"error\":\"SAVE_FAILED\"}");
+            }
+          });
+        });
+    handler->setMethod(HTTP_PUT);
+    g_apiServer.addHandler(handler);
+  }
+
+  g_apiServer.on(kPresetSaveCurrentPattern, HTTP_POST,
+                 [](AsyncWebServerRequest *request) {
+                   String name = request->pathArg(0);
+                   enqueueApiJob([request, name]() {
+                     sendCommandResult(request,
+                                       runCommandForApi("SAVEPRESET " + name));
+                   });
+                 });
+
+  g_apiServer.on(kPresetLoadPattern, HTTP_POST, [](AsyncWebServerRequest *request) {
+    String name = request->pathArg(0);
+    enqueueApiJob([request, name]() {
+      sendCommandResult(request, runCommandForApi("LOADPRESET " + name));
+    });
+  });
+
+  glide::otaRegisterRoute(g_apiServer, GLIDE_OTA_KEY, []() { return isActive(); });
+
+  g_apiServer.begin();
+  Serial.println("REST/WebSocket API listening on port 80 (/api/v1, /ws)");
+}
+
+// Pushes the ~10Hz WebSocket status frame while anything is moving,
+// and a ~5s heartbeat regardless -- see docs/api.md's WebSocket
+// section. Call once per loop() iteration; both are self-throttling
+// via millis(), so this is cheap to call unconditionally.
+void apiTick() {
+  g_apiQueue.drainAll();
+
+  unsigned long now = millis();
+  if (isActive() && now - g_lastWsStatusMs >= 100) {
+    g_lastWsStatusMs = now;
+    wsBroadcastStatus();
+  }
+  if (now - g_lastWsHeartbeatMs >= 5000) {
+    g_lastWsHeartbeatMs = now;
+    if (g_apiWs.count() > 0) {
+      g_apiWs.textAll(String("{\"type\":\"heartbeat\",\"t\":") + now + "}");
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);  // let USB-serial enumerate before the first print
 
   Serial.println();
-  Serial.println("=== Glide M1/M2 motion core (serial control) ===");
+  Serial.println("=== Glide M1/M2/M3 motion core (serial + REST/WebSocket) ===");
   Serial.println("Type HELP for commands.");
+
+  if (strcmp(GLIDE_OTA_KEY, "glide-default-ota-key-change-me") == 0) {
+    Serial.println(
+        "WARNING: using the default OTA key -- see "
+        "firmware/include/secrets.h.example to set a real one before "
+        "this device is reachable beyond your own bench.");
+  }
+
+  g_apiQueue.begin();
 
   // true = format the filesystem if it's missing/corrupt, which is
   // the normal case on a brand-new board's very first boot (there's
@@ -737,6 +1406,18 @@ void setup() {
   stepper->setSpeedInHz(1000);
   stepper->setAcceleration(2000);
 
+  // WiFi/API setup happens LAST, after motion is fully ready to
+  // accept commands -- WiFiManager's blocking portal (if a saved
+  // network isn't reachable) can take up to 3 minutes, and there's no
+  // reason serial control should wait on that.
+  if (glide::wifiSetupBegin()) {
+    setupApiRoutes();
+  } else {
+    Serial.println(
+        "Skipping REST/WebSocket API setup -- no WiFi connection this "
+        "boot. Serial control still works.");
+  }
+
   g_lastTickMs = millis();
 }
 
@@ -771,4 +1452,6 @@ void loop() {
     g_lastTickMs = now;
     controlTick(dtS);
   }
+
+  apiTick();
 }

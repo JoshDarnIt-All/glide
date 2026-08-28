@@ -168,12 +168,12 @@ needing a WebSocket client.
 
 ## Phase enum (firmware change needed, not just an API concern)
 
-Found while designing this contract: today's serial `STATUS` reports
-`PHASE=IDLE` whenever the A-B-A loop isn't running, even mid a plain
-`MOVETO`/`JOG` — there's no way to distinguish "truly idle" from "mid
-a one-shot move." The unified phase concept below needs an actual
-firmware state-model change (not just a translation layer) before
-this API can honestly report it:
+**Fixed during M3 implementation** — see `reportedPhaseName()` in
+`firmware/src/main.cpp`. Previously, serial `STATUS` reported
+`PHASE=IDLE` whenever the A-B-A loop wasn't running, even mid a plain
+`MOVETO`/`JOG` — there was no way to distinguish "truly idle" from
+"mid a one-shot move." The unified phase concept below required an
+actual firmware state-model change (not just a translation layer):
 
 ```
 IDLE, MOVING, MOVING_TO_A, MOVING_TO_B, DWELLING_AT_A, DWELLING_AT_B, STOPPED
@@ -237,11 +237,29 @@ though percent-encoding technically works.
   interrupt-and-go**, no queueing, no confirmation — matches existing
   `LOADPRESET` serial behavior exactly, everywhere.
 
-## Not yet decided (deferred, non-blocking for starting M3 implementation)
+## Resolved during M3 implementation
 
-- Exact `ESPAsyncWebServer` fork/version to pin.
+- **`ESPAsyncWebServer` fork/version:** `ESP32Async/ESPAsyncWebServer`
+  + `ESP32Async/AsyncTCP` (pinned in `firmware/platformio.ini`). The
+  `mathieucarbou` fork Josh originally confirmed has since moved/
+  archived under this org name — same maintainer, same continuation,
+  not a different decision.
+- **`board_build.partitions`:** the stock `min_spiffs.csv` scheme
+  bundled with the arduino-esp32 core (two ~1.9MB OTA app slots +
+  ~190KB LittleFS) — no custom partition table needed, since
+  config.json + presets are a few KB at most. Also requires
+  `board_build.filesystem = littlefs` set explicitly alongside it.
+- **Firmware phase-enum gap** (described below): fixed in
+  `firmware/src/main.cpp` (`reportedPhaseName()`) as part of M3
+  implementation, along with a related latent bug it surfaced —
+  `MOVETO`/`JOG` used to silently no-op instead of erroring when
+  issued during an active loop.
+
+## Still open (non-blocking)
+
 - Status push rate (10Hz is a starting point, not load-bearing to
   lock now).
-- `board_build.partitions` table specifics (trades some LittleFS space
-  for two OTA app slots — needs a concrete proposal before
-  implementation, not just "add one").
+- Exact `ESPAsyncWebServer`/`AsyncTCP` patch version may drift from
+  what's pinned in `platformio.ini` by the time this is built — check
+  https://github.com/ESP32Async/ESPAsyncWebServer/releases for the
+  current 3.x tag.

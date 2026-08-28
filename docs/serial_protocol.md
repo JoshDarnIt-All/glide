@@ -142,8 +142,8 @@ wrong, each is a hard gate.
 
 | Command | Effect |
 |---|---|
-| `MOVETO <mm>` | Absolute move (clamped to soft limits) |
-| `JOG <mm>` | Relative move, +/- |
+| `MOVETO <mm>` | Absolute move (clamped to soft limits). Errors `ERR MOVING` if a move or loop is already active — stop it first |
+| `JOG <mm>` | Relative move, +/- . Same `ERR MOVING` rule as `MOVETO` |
 | `STOP` | Gracefully halts any move or loop in progress (also the way to stop a running loop — there's no separate `LOOPSTOP`) |
 
 ### Loop
@@ -170,7 +170,7 @@ name's spacing/characters otherwise matter exactly as typed.
 
 | Command | Effect |
 |---|---|
-| `STATUS` | One-line dump: position, phase, homed/travel/calibration state, A/B/speed/accel/dwell/repeat, preset count |
+| `STATUS` | One-line dump: position, phase, homed/travel/calibration state, A/B/speed/accel/dwell/repeat, preset count. `PHASE` is one of `IDLE, MOVING, MOVING_TO_A, MOVING_TO_B, DWELLING_AT_A, DWELLING_AT_B, STOPPED` (`MOVING` = a plain `MOVETO`/`JOG` in flight; the rest are the A-B-A loop's own states) — see `docs/api.md`'s phase enum, which this mirrors exactly |
 | `HELP` | Lists all commands (also printed by the firmware itself — this doc and the firmware's `printHelp()` should be kept in sync) |
 
 ## What persists across a reboot
