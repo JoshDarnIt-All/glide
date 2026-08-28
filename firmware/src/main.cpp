@@ -544,6 +544,11 @@ void handleCommand(String line) {
     }
     int idx = findPresetIndex(rest);
     if (idx < 0) {
+      // Diagnostic: show exactly what was searched for and its
+      // length, so it can be compared against LISTPRESETS's
+      // [name](len=N) output to spot a hidden-character mismatch.
+      printEvent("SEARCHED_FOR=[" + rest + "](len=" +
+                 String(rest.length()) + ")");
       printErr("NOT_FOUND");
       return;
     }
@@ -575,7 +580,13 @@ void handleCommand(String line) {
       printOk("NONE");
     } else {
       for (const PresetConfig &preset : g_presets) {
-        String s = preset.name;
+        // Wrapped in [] with an explicit length so a hidden/invisible
+        // character in a name (stray whitespace, a copy-paste
+        // artifact) becomes visible as unexpected padding inside the
+        // brackets or a length that doesn't match what it looks like
+        // -- printing the name bare wouldn't reveal that.
+        String s = "[" + preset.name + "](len=" +
+                   String(preset.name.length()) + ")";
         s += " A=" + String(preset.pos_a_mm, 2);
         s += " B=" + String(preset.pos_b_mm, 2);
         s += " SPEED=" + String(preset.speed_mm_s, 2);
@@ -596,6 +607,8 @@ void handleCommand(String line) {
     }
     int idx = findPresetIndex(rest);
     if (idx < 0) {
+      printEvent("SEARCHED_FOR=[" + rest + "](len=" +
+                 String(rest.length()) + ")");
       printErr("NOT_FOUND");
       return;
     }
