@@ -120,8 +120,16 @@ one actually works, not just "mostly works."
 - **M3 — WiFi provisioning, REST, WebSocket, OTA.** Also: generic-HTTP
   Companion presets, so Companion integration is possible via plain
   HTTP requests even before the dedicated Companion module exists.
+  Planned (not yet implemented) — see `docs/api.md` for the full
+  contract: WiFiManager for provisioning, ESPAsyncWebServer to avoid
+  jittering the motion control tick, a command queue bridging
+  HTTP/WebSocket into the same dispatch logic the serial protocol
+  already uses, and a mutual-exclusion safety interlock between OTA
+  and motion.
 - **M4 — Web GUI.** Built against the API contract in `docs/api.md`,
-  which is written before this milestone starts.
+  which is written before this milestone starts. Initial planning
+  (screens, safety-state representation, preset recall interaction) is
+  in `docs/m4_ui_plan.md`.
 - **M5 — Companion module.** Lives in a separate repo,
   [`companion-module-glide`](https://github.com/JoshDarnIt-All/companion-module-glide),
   also built against `docs/api.md`.
@@ -152,10 +160,12 @@ firmware/          PlatformIO project (ESP32, Arduino framework)
   test/             unit tests for lib/motion (and later lib/api)
 webui/              Vite build; output is gzipped and flashed alongside firmware
 hardware/           wiring diagrams, BOM, CAD, and the donor-rail inspection doc
-docs/api.md         the API contract — written before the web UI or the
-                    Companion module consume it
-docs/serial_protocol.md  M1's bench/dev serial command reference —
+docs/api.md         the REST/WebSocket API contract (M3) — written
+                    before the web UI or the Companion module consume it
+docs/serial_protocol.md  M1/M2's bench/dev serial command reference —
                     the debug interface, not the REST/WebSocket API
+docs/m4_ui_plan.md  M4 web GUI planning — screens, interaction flow,
+                    safety-state representation
 .github/workflows/  CI
 ```
 
