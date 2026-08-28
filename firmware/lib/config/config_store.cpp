@@ -7,6 +7,23 @@ namespace glide {
 
 namespace {
 constexpr const char *kConfigPath = "/config.json";
+
+// Strips control characters (anything below ASCII 32, e.g. a stray
+// backspace byte from an old serial-input bug) out of a preset name.
+// Self-heals any name that was corrupted before that input bug was
+// fixed -- a name saved as an invisible 7-character "test2" reads
+// back as a clean 5-character "test2" from here on, no manual
+// recovery command needed.
+String sanitizePresetName(const String &raw) {
+  String cleaned;
+  cleaned.reserve(raw.length());
+  for (size_t i = 0; i < raw.length(); ++i) {
+    if (static_cast<unsigned char>(raw[i]) >= 32) {
+      cleaned += raw[i];
+    }
+  }
+  return cleaned;
+}
 }
 
 bool loadConfig(DeviceConfig &outConfig) {
@@ -49,7 +66,7 @@ bool loadConfig(DeviceConfig &outConfig) {
 
   for (JsonObject presetObj : doc["presets"].as<JsonArray>()) {
     PresetConfig preset;
-    preset.name = presetObj["name"] | "";
+    preset.name = sanitizePresetName(presetObj["name"] | "");
     preset.pos_a_mm = presetObj["pos_a_mm"] | 0.0;
     preset.pos_b_mm = presetObj["pos_b_mm"] | 0.0;
     preset.speed_mm_s = presetObj["speed_mm_s"] | 20.0;

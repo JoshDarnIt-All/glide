@@ -273,6 +273,23 @@ void startLoopFromCurrentSettings() {
   g_lastLoopPhase = g_loopRunner.phase();
 }
 
+// Strips control characters (anything below ASCII 32) out of a name
+// before it's stored. Defense-in-depth alongside the loop()'s
+// backspace/DEL handling: even if some other input path ever
+// introduces a stray control byte, a preset name can't silently end
+// up containing one -- see config_store.cpp's matching helper, which
+// self-heals names already corrupted from before that fix existed.
+String sanitizePresetName(const String &raw) {
+  String cleaned;
+  cleaned.reserve(raw.length());
+  for (size_t i = 0; i < raw.length(); ++i) {
+    if (static_cast<unsigned char>(raw[i]) >= 32) {
+      cleaned += raw[i];
+    }
+  }
+  return cleaned;
+}
+
 // -1 if not found. Case-INSENSITIVE match -- command verbs are
 // already normalized to uppercase before dispatch (so LOADPRESET,
 // loadpreset, LoadPreset all work identically), but the preset NAME
@@ -515,8 +532,13 @@ void handleCommand(String line) {
       printErr("USAGE_SAVEPRESET_NAME");
       return;
     }
+    String cleanName = sanitizePresetName(rest);
+    if (cleanName.length() == 0) {
+      printErr("USAGE_SAVEPRESET_NAME");
+      return;
+    }
     PresetConfig preset;
-    preset.name = rest;
+    preset.name = cleanName;
     preset.pos_a_mm = g_posAMm;
     preset.pos_b_mm = g_posBMm;
     preset.speed_mm_s = g_speedMmS;
@@ -524,7 +546,7 @@ void handleCommand(String line) {
     preset.dwell_a_s = g_dwellAS;
     preset.dwell_b_s = g_dwellBS;
     preset.repeat = g_repeat;
-    int idx = findPresetIndex(rest);
+    int idx = findPresetIndex(cleanName);
     if (idx >= 0) {
       g_presets[idx] = preset;  // overwrite existing preset of this name
     } else {
@@ -724,7 +746,21 @@ void loop() {
     if (c == '\n') {
       handleCommand(g_lineBuffer);
       g_lineBuffer = "";
-    } else if (c != '\r') {
+    } else if (c == '\r') {
+      // ignore -- part of a \r\n line ending, not real content
+    } else if (c == '\b' || c == 127) {
+      // Backspace (8) or DEL (127): a terminal shows you the
+      // corrected text on screen, but still transmits the raw
+      // backspace byte itself -- without handling it here, that byte
+      // was silently appended into the buffer as an invisible
+      // character instead of actually erasing the previous one. This
+      // is exactly what corrupted a saved preset name (visually
+      // "test2", actually 7 characters long) after a mid-typing typo
+      // correction.
+      if (g_lineBuffer.length() > 0) {
+        g_lineBuffer.remove(g_lineBuffer.length() - 1);
+      }
+    } else {
       g_lineBuffer += c;
     }
   }
