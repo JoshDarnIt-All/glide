@@ -26,10 +26,11 @@ same process used for every prior milestone's decisions.
 
 ## Architecture (why the endpoints below are shaped this way)
 
-- **Server:** `ESPAsyncWebServer` + `AsyncTCP` (the actively-maintained
-  fork — confirm exact fork/pin at implementation time; the original
-  `me-no-dev` repo is stale). Chosen because the synchronous built-in
-  Arduino `WebServer` blocks `loop()` per-request, which would
+- **Server:** `ESP32Async/ESPAsyncWebServer` + `ESP32Async/AsyncTCP`
+  (pinned in `firmware/platformio.ini`) — the actively-maintained
+  continuation of the original `me-no-dev` repo, which is stale.
+  Chosen because the synchronous built-in Arduino `WebServer` blocks
+  `loop()` per-request, which would
   directly jitter `controlTick()`'s 20ms S-curve velocity-following —
   precisely the stutter M1 was built to eliminate. This is a hard
   constraint, not a style preference.
@@ -202,9 +203,11 @@ discouraged:**
   soft-limit violation. Requiring full-stop first removes the
   question entirely rather than depending on an unverified assumption
   about timer/ISR behavior during a flash write.
-- Requires a `board_build.partitions` change in `platformio.ini` (no
-  OTA-capable partition table exists yet) — a real build-config change
-  for M3, not just application code.
+- Requires the `board_build.partitions = min_spiffs.csv` +
+  `board_build.filesystem = littlefs` change in `platformio.ini` (done
+  — see "Resolved during M3 implementation" below) for the two OTA app
+  slots this needs, since the default `esp32dev` partition table only
+  has one.
 
 ## Companion generic-HTTP integration
 
@@ -263,3 +266,67 @@ though percent-encoding technically works.
   what's pinned in `platformio.ini` by the time this is built — check
   https://github.com/ESP32Async/ESPAsyncWebServer/releases for the
   current 3.x tag.
+
+## First build / bring-up checklist
+
+M3 was written in an environment with no ESP32 toolchain (only
+`firmware/lib/motion`'s native tests could actually be compiled and
+run — see `firmware/test/test_motion`). Everything in `firmware/src`
+and `firmware/lib/api` is unverified against the real build until this
+checklist is done once on real hardware.
+
+**Before building:**
+
+1. Copy `firmware/include/secrets.h.example` to
+   `firmware/include/secrets.h` (gitignored, safe to put real values
+   in). At minimum, set `GLIDE_OTA_KEY` to something real — a
+   hardcoded default compiles in otherwise, with a loud warning printed
+   over serial every boot. Optionally set `GLIDE_WIFI_SSID`/
+   `GLIDE_WIFI_PASS` too, to skip WiFiManager's captive portal on
+   every rebuild during bench testing.
+
+**If `pio run -e esp32dev` fails to compile**, these are the specific
+spots flagged in code comments as written from established library
+knowledge rather than compiled here — check these first, in this
+order:
+
+1. The preset-name routes (`/api/v1/presets/...` in
+   `setupApiRoutes()`, `firmware/src/main.cpp`) rely on
+   ESPAsyncWebServer's regex URL matching (`^...$` patterns +
+   `request->pathArg(0)`), gated by the `-DASYNCWEBSERVER_REGEX` build
+   flag in `platformio.ini`. If these routes don't compile, or compile
+   but never match a real request, confirm that flag is still the
+   correct one for the pinned ESPAsyncWebServer version.
+2. Every PATCH/PUT/POST-with-a-JSON-body route uses `new
+   AsyncCallbackJsonWebHandler(uri, callback)` +
+   `handler->setMethod(...)` + `server.addHandler(handler)`. If this
+   doesn't compile, check the current class name/constructor signature
+   in the installed ESPAsyncWebServer headers.
+3. `firmware/lib/api/ota_handler.cpp` uses
+   `request->hasHeader()`/`request->getHeader()->value()` to read
+   `X-Glide-OTA-Key`. Same story if this doesn't compile.
+
+**Testing after a successful flash, roughly in this order (each one
+confirms a layer works before testing the next):**
+
+1. **Serial monitor at boot** — should show either "WiFi connected:
+   ..." or WiFiManager's own portal SSID (`Glide-Setup`) if no saved
+   network was found. If the portal comes up, join it from a phone; it
+   should show a captive-portal page to enter your real WiFi.
+2. **REST, read-only** — from another device on the same LAN:
+   `curl http://glide.local/api/v1/status` (use the device's IP
+   instead if `glide.local` doesn't resolve — printed on the serial
+   monitor too). Should return the same JSON shape shown above.
+3. **REST, a real command** — e.g.
+   `curl -X PATCH http://glide.local/api/v1/axis -d '{"travel_mm":500}'`
+   then `curl http://glide.local/api/v1/axis` to confirm it stuck.
+4. **WebSocket** — `new WebSocket("ws://glide.local/ws")` in a
+   browser's dev console (or `websocat ws://glide.local/ws`). Should
+   receive a `{"type":"heartbeat",...}` frame every ~5s even with
+   nothing moving, and `{"type":"status",...}` frames while a move is
+   active.
+5. **OTA, last** — this one reboots the device, so confirm everything
+   else works first:
+   `curl -X POST http://glide.local/api/v1/ota -H "X-Glide-OTA-Key: <your key>" -F "firmware=@.pio/build/esp32dev/firmware.bin"`.
+   Have a USB cable within reach in case a bad image needs recovering
+   via a wired re-flash.

@@ -152,12 +152,17 @@ one actually works, not just "mostly works."
 ```
 firmware/          PlatformIO project (ESP32, Arduino framework)
   platformio.ini
+  include/          project-wide headers — secrets.h.example (copy to
+                    secrets.h, gitignored, for a real OTA key / bench WiFi)
   src/              application code — setup/loop, wiring the pieces together
   lib/motion/       ramp + loop math only — no Arduino or WiFi deps,
                     so it can be unit-tested on the laptop, not just on-device
   lib/config/       config.json persistence (LittleFS + ArduinoJson) —
                     axis config + named presets, schema_version'd
-  lib/api/          REST/WebSocket handlers, once M3 starts
+  lib/api/          REST/WebSocket/OTA plumbing (M3): command_queue,
+                    wifi_setup, ota_handler — see firmware/src/main.cpp
+                    for the actual route handlers wiring these into
+                    motion state
   test/             unit tests for lib/motion (and later lib/api)
 webui/              Vite build; output is gzipped and flashed alongside firmware
 hardware/           wiring diagrams, BOM, CAD, and the donor-rail inspection doc
