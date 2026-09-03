@@ -33,7 +33,14 @@ import sys
 
 Import("env")  # noqa: F821 -- injected by PlatformIO's SCons environment
 
-FIRMWARE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# NOT __file__ -- PlatformIO/SCons runs extra_scripts via exec() against
+# a shared globals dict (see SCons's SConscript.py), which never sets
+# __file__ the way a normally-imported Python module would. Confirmed
+# on Josh's real first build: `NameError: name '__file__' is not
+# defined`. env["PROJECT_DIR"] is the documented, correct way to get an
+# absolute path in a PlatformIO extra_script -- it's the directory
+# platformio.ini lives in, i.e. firmware/.
+FIRMWARE_DIR = env["PROJECT_DIR"]  # noqa: F821
 REPO_ROOT = os.path.dirname(FIRMWARE_DIR)
 WEBUI_DIR = os.path.join(REPO_ROOT, "webui")
 DIST_DIR = os.path.join(WEBUI_DIR, "dist")
