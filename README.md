@@ -120,13 +120,17 @@ one actually works, not just "mostly works."
 - **M3 — WiFi provisioning, REST, WebSocket, OTA.** Also: generic-HTTP
   Companion presets, so Companion integration is possible via plain
   HTTP requests even before the dedicated Companion module exists.
-  Implemented; not yet verified on real hardware (no ESP32 toolchain
-  in the environment that wrote it — see `docs/api.md` for the full
-  contract and open build-verification flags). WiFiManager for
-  provisioning, ESPAsyncWebServer to avoid jittering the motion control
-  tick, a command queue bridging HTTP/WebSocket into the same dispatch
-  logic the serial protocol already uses, and a mutual-exclusion safety
-  interlock between OTA and motion.
+  WiFi provisioning, REST (reads and writes), and WebSocket are
+  confirmed working on real hardware; OTA is written but not yet
+  hardware-tested (see `docs/api.md`'s bring-up checklist for status
+  and the real bugs bring-up caught). WiFiManager for provisioning,
+  ESPAsyncWebServer to avoid jittering the motion control tick, and a
+  mutual-exclusion safety interlock between OTA and motion. REST
+  handlers run synchronously on AsyncTCP's own task and respond
+  immediately, guarded by a mutex against `loop()`'s own motion-state
+  access — an initial design that deferred each handler's work into a
+  queue drained from `loop()` didn't survive contact with
+  ESPAsyncWebServer's actual requirements.
 - **M4 — Web GUI.** Built against the API contract in `docs/api.md`,
   which is written before this milestone starts. Initial planning
   (screens, safety-state representation, preset recall interaction) is

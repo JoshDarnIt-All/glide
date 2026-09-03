@@ -279,9 +279,14 @@ though percent-encoding technically works.
 
 M3 was written in an environment with no ESP32 toolchain (only
 `firmware/lib/motion`'s native tests could actually be compiled and
-run — see `firmware/test/test_motion`). Everything in `firmware/src`
-and `firmware/lib/api` is unverified against the real build until this
-checklist is done once on real hardware.
+run — see `firmware/test/test_motion`), so this checklist is what
+actually walked it onto real hardware, including three real bugs it
+caught that no amount of code review would have (see "Real bugs found
+during hardware bring-up" below).
+
+**Status as of the bring-up session (2026-09-03): WiFi provisioning,
+REST (reads and writes), and WebSocket are all confirmed working on
+real hardware. OTA is written but not yet tested.**
 
 **Before building:**
 
@@ -317,15 +322,18 @@ order:
 **Testing after a successful flash, roughly in this order (each one
 confirms a layer works before testing the next):**
 
-1. **Serial monitor at boot** — should show either "WiFi connected:
+1. ✅ **Serial monitor at boot** — should show either "WiFi connected:
    ..." or WiFiManager's own portal SSID (`Glide-Setup`) if no saved
    network was found. If the portal comes up, join it from a phone; it
    should show a captive-portal page to enter your real WiFi.
-2. **REST, read-only** — from another device on the same LAN:
+   Confirmed working, both through the portal (first boot) and a
+   direct saved-credential connect (subsequent boots).
+2. ✅ **REST, read-only** — from another device on the same LAN:
    `curl http://glide.local/api/v1/status` (use the device's IP
    instead if `glide.local` doesn't resolve — printed on the serial
    monitor too). Should return the same JSON shape shown above.
-3. **REST, a real command** — e.g.
+   Confirmed working.
+3. ✅ **REST, a real command** — e.g.
    `curl -X PATCH http://glide.local/api/v1/axis -H "Content-Type: application/json" -d '{"travel_mm":500}'`
    then `curl http://glide.local/api/v1/axis` to confirm it stuck. The
    `Content-Type` header is required — `curl -d` defaults to
@@ -334,13 +342,62 @@ confirms a layer works before testing the next):**
    `Not found` (confirmed on real hardware: this reads as "no handler
    matched at all," a different failure than an unhandled-but-matched
    request, which is what a genuinely missing/broken route looks like).
-4. **WebSocket** — `new WebSocket("ws://glide.local/ws")` in a
+   Confirmed working (with the header).
+4. ✅ **WebSocket** — `new WebSocket("ws://glide.local/ws")` in a
    browser's dev console (or `websocat ws://glide.local/ws`). Should
    receive a `{"type":"heartbeat",...}` frame every ~5s even with
    nothing moving, and `{"type":"status",...}` frames while a move is
-   active.
-5. **OTA, last** — this one reboots the device, so confirm everything
+   active. Confirmed working — heartbeats arrived exactly 5s apart.
+5. ⬜ **OTA, next up** — this one reboots the device, so confirm everything
    else works first:
    `curl -X POST http://glide.local/api/v1/ota -H "X-Glide-OTA-Key: <your key>" -F "firmware=@.pio/build/esp32dev/firmware.bin"`.
    Have a USB cable within reach in case a bad image needs recovering
    via a wired re-flash.
+
+## Real bugs found during hardware bring-up (worth remembering as lessons)
+
+None of these were catchable without an actual ESP32 toolchain and
+real hardware — worth remembering the *pattern*, not just the fixes,
+for future milestones written the same way (planned/coded without
+hardware access, verified afterward with Josh at the bench):
+
+1. **`CommandResult{ok, detail}` failed to compile** — a struct with a
+   default member initializer (`bool ok = false;`) stops counting as a
+   plain aggregate on a C++ standard older than C++14, which is what
+   this ESP32 Arduino toolchain defaults to. Same class of issue as
+   the earlier `std::clamp`/C++17 lesson from M1: don't assume a
+   modern C++ feature "just works" against this specific toolchain's
+   defaults. Fixed by dropping the default member initializer.
+2. **The generic PlatformIO "Build" button builds every environment**,
+   including `native` (test-only, meant for `pio test -e native`) —
+   tried and failed to compile `firmware/src/main.cpp` and the
+   Arduino-dependent parts of `lib/config`/`lib/api` against the host
+   compiler. Fixed with `build_src_filter` on `[env:native]` plus
+   `default_envs = esp32dev` in a new `[platformio]` section, so a
+   plain Build only ever targets the real firmware.
+3. **REST API failed to bind port 80 right after the WiFiManager setup
+   portal** (`[E][AsyncTCP.cpp] begin(): bind error: -8`, i.e. address
+   already in use) — WiFiManager's own captive-portal server also uses
+   port 80, and doesn't release it instantly even after `autoConnect()`
+   returns. Only reproduces the first time WiFi is set up (or after a
+   reset); fixed with a short delay before starting the REST server,
+   specifically on the portal path.
+4. **The big one: every REST route returned "Handler did not handle
+   the request"** — the original design deferred each handler's real
+   work (and its `request->send()` call) into a queue drained from
+   `loop()`, specifically to avoid touching motion globals from
+   AsyncTCP's task directly. That assumption about ESPAsyncWebServer
+   was wrong: it requires `request->send()` synchronously, before the
+   handler returns. Reworked to have handlers respond immediately and
+   use a mutex (`g_motionMutex`/`MotionLock`) for thread safety
+   instead of deferring the work — see "Command dispatch" above.
+   Lesson: an architecture decision reasoned out in advance, without
+   the ability to verify it against the real library's actual runtime
+   behavior, is a hypothesis, not a fact — worth stating that
+   uncertainty explicitly rather than presenting it as settled (it
+   wasn't in the original write-up).
+5. **`curl -d` without `-H "Content-Type: application/json"`** returns
+   a plain `Not found` from a JSON-body route, not a JSON error — a
+   testing gotcha, not a firmware bug, but confusing enough on first
+   hit that it's worth documenting explicitly (see the REST bring-up
+   step above).
