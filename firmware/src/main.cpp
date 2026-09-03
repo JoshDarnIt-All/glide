@@ -63,7 +63,9 @@
 
 #include <vector>
 
-#include "command_queue.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 #include "config_store.h"
 #include "loop_runner.h"
 #include "ota_handler.h"
@@ -180,13 +182,44 @@ double g_currentVelocityMmS = 0.0;
 String g_activePresetName;
 
 // M3: REST + WebSocket network API. See firmware/lib/api for the
-// reusable pieces (CommandQueue, WiFi/mDNS setup, OTA upload handling)
-// and docs/api.md for the full contract these routes implement.
+// reusable pieces (WiFi/mDNS setup, OTA upload handling) and
+// docs/api.md for the full contract these routes implement.
 AsyncWebServer g_apiServer(80);
 AsyncWebSocket g_apiWs("/ws");
-glide::CommandQueue g_apiQueue;
 unsigned long g_lastWsStatusMs = 0;
 unsigned long g_lastWsHeartbeatMs = 0;
+
+// Guards every read/write of motion state (the g_* globals above,
+// g_loopRunner, g_presets) against the real cross-task race between
+// loop()'s own thread and AsyncTCP's task, which is what REST/
+// WebSocket handlers run on.
+//
+// The original design deferred each REST handler's actual work into
+// a queue drained from loop(), specifically to avoid touching motion
+// globals from AsyncTCP's task at all -- but that broke on real
+// hardware: ESPAsyncWebServer requires request->send() to be called
+// SYNCHRONOUSLY, before the handler function returns (confirmed via
+// the exact "Handler did not handle the request" fallback it sends
+// when a handler returns without calling send() itself -- every route
+// hit this on first hardware test). So REST handlers now do their
+// work directly on AsyncTCP's task, synchronously, guarded by this
+// mutex instead of being deferred -- loop() takes the same mutex
+// around its own motion-state access (serial command dispatch,
+// controlTick()) so the two are never touching this state at once.
+SemaphoreHandle_t g_motionMutex = nullptr;
+
+// RAII scoped lock for g_motionMutex -- several handlers below have
+// more than one return path (e.g. an early 404), and a plain
+// take/give pair is easy to get wrong once there's more than one
+// `return` between them. Declaring one of these as a local variable
+// takes the mutex immediately and releases it whenever that scope
+// ends, return included.
+struct MotionLock {
+  MotionLock() { xSemaphoreTake(g_motionMutex, portMAX_DELAY); }
+  ~MotionLock() { xSemaphoreGive(g_motionMutex); }
+  MotionLock(const MotionLock &) = delete;
+  MotionLock &operator=(const MotionLock &) = delete;
+};
 
 // ---- Serial reply helpers ----
 // OK/ERR for direct command replies, "# " for asynchronous events
@@ -523,9 +556,11 @@ void printStatus() {
 
 // ---- M3: JSON builders shared by REST responses and the WebSocket
 // status push -- see docs/api.md for the exact response shapes these
-// match. All run from loop()'s own thread (queued via g_apiQueue for
-// REST; called directly from loop()/controlTick() for the WebSocket
-// push), same as every other read of these globals.
+// match. Callers are responsible for holding g_motionMutex while
+// calling these (see setupApiRoutes() and apiTick()) -- these
+// functions don't take it themselves so a caller that already needs
+// the mutex for other work in the same handler doesn't have to
+// release and immediately re-take it.
 String buildStatusJson() {
   JsonDocument doc;
   doc["position_mm"] = g_currentPositionMm;
@@ -629,14 +664,6 @@ void sendCommandResult(AsyncWebServerRequest *request,
     request->send(httpStatusForError(result.detail), "application/json",
                   "{\"error\":\"" + result.detail + "\"}");
   }
-}
-
-// Queues `job` to run on loop()'s own thread (see
-// firmware/lib/api/command_queue.h) instead of directly on
-// AsyncTCP's task -- every REST/WebSocket handler in this file goes
-// through this, so none of them ever touches a motion global directly.
-void enqueueApiJob(std::function<void()> job) {
-  g_apiQueue.push(std::move(job));
 }
 
 // One WebSocket frame type -- see docs/api.md's WebSocket section.
@@ -1032,12 +1059,16 @@ void controlTick(double dtS) {
 }
 
 // ---- M3: REST + WebSocket route registration ----
-// Every handler below does the minimum possible work on AsyncTCP's own
-// task (parse the request into plain values) and defers everything
-// else -- reading/writing motion state, building the response body,
-// calling request->send() -- into a job pushed onto g_apiQueue and run
-// from loop() (see enqueueApiJob()/CommandQueue). See docs/api.md for
-// the full endpoint table these implement.
+// Every handler below runs SYNCHRONOUSLY on AsyncTCP's own task and
+// calls request->send() itself before returning -- confirmed on real
+// hardware that ESPAsyncWebServer requires this (a handler that
+// returns without responding gets its request answered with the
+// framework's own generic "Handler did not handle the request"
+// fallback instead, which is what an earlier, deferred-to-loop()
+// version of this file hit on every single route). Thread safety
+// against loop()'s own motion-state access (serial dispatch,
+// controlTick()) comes from g_motionMutex/MotionLock instead of
+// deferring the work -- see the comment on g_motionMutex above.
 //
 // The PATCH/PUT/POST-with-body routes use `new
 // AsyncCallbackJsonWebHandler(uri, callback)` + `handler->setMethod(...)`
@@ -1063,14 +1094,13 @@ void setupApiRoutes() {
   g_apiServer.addHandler(&g_apiWs);
 
   g_apiServer.on("/api/v1/home", HTTP_POST, [](AsyncWebServerRequest *request) {
-    enqueueApiJob([request]() {
-      sendCommandResult(request, runCommandForApi("SETHOME"));
-    });
+    MotionLock lock;
+    sendCommandResult(request, runCommandForApi("SETHOME"));
   });
 
   g_apiServer.on("/api/v1/axis", HTTP_GET, [](AsyncWebServerRequest *request) {
-    enqueueApiJob(
-        [request]() { request->send(200, "application/json", buildAxisJson()); });
+    MotionLock lock;
+    request->send(200, "application/json", buildAxisJson());
   });
 
   {
@@ -1081,16 +1111,15 @@ void setupApiRoutes() {
           bool hasSteps = body["steps_per_mm"].is<double>();
           double travel = hasTravel ? body["travel_mm"].as<double>() : 0.0;
           double steps = hasSteps ? body["steps_per_mm"].as<double>() : 0.0;
-          enqueueApiJob([=]() {
-            CommandResult result{true, ""};
-            if (hasTravel) {
-              result = runCommandForApi("SETTRAVEL " + String(travel, 3));
-            }
-            if (result.ok && hasSteps) {
-              result = runCommandForApi("SETSTEPSPERMM " + String(steps, 6));
-            }
-            sendCommandResult(request, result);
-          });
+          MotionLock lock;
+          CommandResult result{true, ""};
+          if (hasTravel) {
+            result = runCommandForApi("SETTRAVEL " + String(travel, 3));
+          }
+          if (result.ok && hasSteps) {
+            result = runCommandForApi("SETSTEPSPERMM " + String(steps, 6));
+          }
+          sendCommandResult(request, result);
         });
     handler->setMethod(HTTP_PATCH);
     g_apiServer.addHandler(handler);
@@ -1098,9 +1127,8 @@ void setupApiRoutes() {
 
   g_apiServer.on("/api/v1/loop-config", HTTP_GET,
                  [](AsyncWebServerRequest *request) {
-                   enqueueApiJob([request]() {
-                     request->send(200, "application/json", buildLoopConfigJson());
-                   });
+                   MotionLock lock;
+                   request->send(200, "application/json", buildLoopConfigJson());
                  });
 
   {
@@ -1128,23 +1156,22 @@ void setupApiRoutes() {
           // effect; later ones don't) -- matches how a client sending
           // these as separate serial commands one at a time would
           // behave anyway.
-          enqueueApiJob([=]() {
-            CommandResult result{true, ""};
-            if (result.ok && hasA) result = runCommandForApi("SETA " + String(a, 3));
-            if (result.ok && hasB) result = runCommandForApi("SETB " + String(b, 3));
-            if (result.ok && hasSpeed)
-              result = runCommandForApi("SETSPEED " + String(speed, 3));
-            if (result.ok && hasAccel)
-              result = runCommandForApi("SETACCEL " + String(accel, 3));
-            if (result.ok && hasDwellA)
-              result = runCommandForApi("SETDWELL A " + String(dwellA, 3));
-            if (result.ok && hasDwellB)
-              result = runCommandForApi("SETDWELL B " + String(dwellB, 3));
-            if (result.ok && hasRepeat)
-              result = runCommandForApi(String("SETREPEAT ") +
-                                        (repeat ? "ON" : "OFF"));
-            sendCommandResult(request, result);
-          });
+          MotionLock lock;
+          CommandResult result{true, ""};
+          if (result.ok && hasA) result = runCommandForApi("SETA " + String(a, 3));
+          if (result.ok && hasB) result = runCommandForApi("SETB " + String(b, 3));
+          if (result.ok && hasSpeed)
+            result = runCommandForApi("SETSPEED " + String(speed, 3));
+          if (result.ok && hasAccel)
+            result = runCommandForApi("SETACCEL " + String(accel, 3));
+          if (result.ok && hasDwellA)
+            result = runCommandForApi("SETDWELL A " + String(dwellA, 3));
+          if (result.ok && hasDwellB)
+            result = runCommandForApi("SETDWELL B " + String(dwellB, 3));
+          if (result.ok && hasRepeat)
+            result = runCommandForApi(String("SETREPEAT ") +
+                                      (repeat ? "ON" : "OFF"));
+          sendCommandResult(request, result);
         });
     handler->setMethod(HTTP_PATCH);
     g_apiServer.addHandler(handler);
@@ -1152,25 +1179,22 @@ void setupApiRoutes() {
 
   g_apiServer.on("/api/v1/loop-config/mark-a", HTTP_POST,
                  [](AsyncWebServerRequest *request) {
-                   enqueueApiJob([request]() {
-                     sendCommandResult(request, runCommandForApi("SETA"));
-                   });
+                   MotionLock lock;
+                   sendCommandResult(request, runCommandForApi("SETA"));
                  });
   g_apiServer.on("/api/v1/loop-config/mark-b", HTTP_POST,
                  [](AsyncWebServerRequest *request) {
-                   enqueueApiJob([request]() {
-                     sendCommandResult(request, runCommandForApi("SETB"));
-                   });
+                   MotionLock lock;
+                   sendCommandResult(request, runCommandForApi("SETB"));
                  });
 
   {
     auto *handler = new AsyncCallbackJsonWebHandler(
         "/api/v1/move", [](AsyncWebServerRequest *request, JsonVariant &json) {
           double posMm = json["pos_mm"] | 0.0;
-          enqueueApiJob([=]() {
-            sendCommandResult(request,
-                              runCommandForApi("MOVETO " + String(posMm, 3)));
-          });
+          MotionLock lock;
+          sendCommandResult(request,
+                            runCommandForApi("MOVETO " + String(posMm, 3)));
         });
     handler->setMethod(HTTP_POST);
     g_apiServer.addHandler(handler);
@@ -1180,47 +1204,45 @@ void setupApiRoutes() {
     auto *handler = new AsyncCallbackJsonWebHandler(
         "/api/v1/jog", [](AsyncWebServerRequest *request, JsonVariant &json) {
           double deltaMm = json["delta_mm"] | 0.0;
-          enqueueApiJob([=]() {
-            sendCommandResult(request,
-                              runCommandForApi("JOG " + String(deltaMm, 3)));
-          });
+          MotionLock lock;
+          sendCommandResult(request,
+                            runCommandForApi("JOG " + String(deltaMm, 3)));
         });
     handler->setMethod(HTTP_POST);
     g_apiServer.addHandler(handler);
   }
 
   g_apiServer.on("/api/v1/stop", HTTP_POST, [](AsyncWebServerRequest *request) {
-    enqueueApiJob(
-        [request]() { sendCommandResult(request, runCommandForApi("STOP")); });
+    MotionLock lock;
+    sendCommandResult(request, runCommandForApi("STOP"));
   });
 
   g_apiServer.on("/api/v1/loop/start", HTTP_POST,
                  [](AsyncWebServerRequest *request) {
-                   enqueueApiJob([request]() {
-                     sendCommandResult(request, runCommandForApi("LOOPSTART"));
-                   });
+                   MotionLock lock;
+                   sendCommandResult(request, runCommandForApi("LOOPSTART"));
                  });
 
   g_apiServer.on("/api/v1/presets", HTTP_GET, [](AsyncWebServerRequest *request) {
-    enqueueApiJob(
-        [request]() { request->send(200, "application/json", buildPresetsJson()); });
+    MotionLock lock;
+    request->send(200, "application/json", buildPresetsJson());
   });
 
   g_apiServer.on("/api/v1/config/save", HTTP_POST,
                  [](AsyncWebServerRequest *request) {
-                   enqueueApiJob([request]() {
-                     sendCommandResult(request, runCommandForApi("SAVECONFIG"));
-                   });
+                   MotionLock lock;
+                   sendCommandResult(request, runCommandForApi("SAVECONFIG"));
                  });
 
   g_apiServer.on("/api/v1/status", HTTP_GET, [](AsyncWebServerRequest *request) {
-    enqueueApiJob(
-        [request]() { request->send(200, "application/json", buildStatusJson()); });
+    MotionLock lock;
+    request->send(200, "application/json", buildStatusJson());
   });
 
   g_apiServer.on("/api/v1/wifi", HTTP_GET, [](AsyncWebServerRequest *request) {
-    enqueueApiJob(
-        [request]() { request->send(200, "application/json", buildWifiJson()); });
+    // WiFi.SSID()/RSSI()/localIP() aren't motion state -- no lock
+    // needed, they're managed by the WiFi stack, not loop().
+    request->send(200, "application/json", buildWifiJson());
   });
 
   // ---- Preset-name-parameterized routes ----
@@ -1239,23 +1261,21 @@ void setupApiRoutes() {
 
   g_apiServer.on(kPresetNamePattern, HTTP_GET, [](AsyncWebServerRequest *request) {
     String name = request->pathArg(0);
-    enqueueApiJob([request, name]() {
-      int idx = findPresetIndex(name);
-      if (idx < 0) {
-        request->send(404, "application/json", "{\"error\":\"NOT_FOUND\"}");
-        return;
-      }
-      request->send(200, "application/json", buildSinglePresetJson(g_presets[idx]));
-    });
+    MotionLock lock;
+    int idx = findPresetIndex(name);
+    if (idx < 0) {
+      request->send(404, "application/json", "{\"error\":\"NOT_FOUND\"}");
+      return;
+    }
+    request->send(200, "application/json", buildSinglePresetJson(g_presets[idx]));
   });
 
   g_apiServer.on(kPresetNamePattern, HTTP_DELETE,
                  [](AsyncWebServerRequest *request) {
                    String name = request->pathArg(0);
-                   enqueueApiJob([request, name]() {
-                     sendCommandResult(request,
-                                       runCommandForApi("DELETEPRESET " + name));
-                   });
+                   MotionLock lock;
+                   sendCommandResult(request,
+                                     runCommandForApi("DELETEPRESET " + name));
                  });
 
   {
@@ -1277,34 +1297,32 @@ void setupApiRoutes() {
           double dwellA = body["dwell_a_s"] | 0.0;
           double dwellB = body["dwell_b_s"] | 0.0;
           bool repeat = body["repeat"] | true;
-          enqueueApiJob([=]() {
-            if (!hasA || !hasB) {
-              request->send(400, "application/json",
-                            "{\"error\":\"INVALID_VALUE\"}");
-              return;
-            }
-            PresetConfig preset;
-            preset.name = sanitizePresetName(name);
-            preset.pos_a_mm = posA;
-            preset.pos_b_mm = posB;
-            preset.speed_mm_s = speed;
-            preset.accel_mm_s2 = accel;
-            preset.dwell_a_s = dwellA;
-            preset.dwell_b_s = dwellB;
-            preset.repeat = repeat;
-            int idx = findPresetIndex(preset.name);
-            if (idx >= 0) {
-              g_presets[idx] = preset;
-            } else {
-              g_presets.push_back(preset);
-            }
-            if (persistConfig()) {
-              request->send(200, "application/json", "{\"ok\":true}");
-            } else {
-              request->send(500, "application/json",
-                            "{\"error\":\"SAVE_FAILED\"}");
-            }
-          });
+          if (!hasA || !hasB) {
+            request->send(400, "application/json",
+                          "{\"error\":\"INVALID_VALUE\"}");
+            return;
+          }
+          MotionLock lock;
+          PresetConfig preset;
+          preset.name = sanitizePresetName(name);
+          preset.pos_a_mm = posA;
+          preset.pos_b_mm = posB;
+          preset.speed_mm_s = speed;
+          preset.accel_mm_s2 = accel;
+          preset.dwell_a_s = dwellA;
+          preset.dwell_b_s = dwellB;
+          preset.repeat = repeat;
+          int idx = findPresetIndex(preset.name);
+          if (idx >= 0) {
+            g_presets[idx] = preset;
+          } else {
+            g_presets.push_back(preset);
+          }
+          if (persistConfig()) {
+            request->send(200, "application/json", "{\"ok\":true}");
+          } else {
+            request->send(500, "application/json", "{\"error\":\"SAVE_FAILED\"}");
+          }
         });
     handler->setMethod(HTTP_PUT);
     g_apiServer.addHandler(handler);
@@ -1313,20 +1331,21 @@ void setupApiRoutes() {
   g_apiServer.on(kPresetSaveCurrentPattern, HTTP_POST,
                  [](AsyncWebServerRequest *request) {
                    String name = request->pathArg(0);
-                   enqueueApiJob([request, name]() {
-                     sendCommandResult(request,
-                                       runCommandForApi("SAVEPRESET " + name));
-                   });
+                   MotionLock lock;
+                   sendCommandResult(request,
+                                     runCommandForApi("SAVEPRESET " + name));
                  });
 
   g_apiServer.on(kPresetLoadPattern, HTTP_POST, [](AsyncWebServerRequest *request) {
     String name = request->pathArg(0);
-    enqueueApiJob([request, name]() {
-      sendCommandResult(request, runCommandForApi("LOADPRESET " + name));
-    });
+    MotionLock lock;
+    sendCommandResult(request, runCommandForApi("LOADPRESET " + name));
   });
 
-  glide::otaRegisterRoute(g_apiServer, GLIDE_OTA_KEY, []() { return isActive(); });
+  glide::otaRegisterRoute(g_apiServer, GLIDE_OTA_KEY, []() {
+    MotionLock lock;
+    return isActive();
+  });
 
   g_apiServer.begin();
   Serial.println("REST/WebSocket API listening on port 80 (/api/v1, /ws)");
@@ -1335,14 +1354,18 @@ void setupApiRoutes() {
 // Pushes the ~10Hz WebSocket status frame while anything is moving,
 // and a ~5s heartbeat regardless -- see docs/api.md's WebSocket
 // section. Call once per loop() iteration; both are self-throttling
-// via millis(), so this is cheap to call unconditionally.
+// via millis(), so this is cheap to call unconditionally. Runs on
+// loop()'s own thread, same as controlTick() -- MotionLock here is
+// what keeps it from reading motion state at the same instant a REST
+// handler (on AsyncTCP's task) is writing it.
 void apiTick() {
-  g_apiQueue.drainAll();
-
   unsigned long now = millis();
-  if (isActive() && now - g_lastWsStatusMs >= 100) {
-    g_lastWsStatusMs = now;
-    wsBroadcastStatus();
+  if (now - g_lastWsStatusMs >= 100) {
+    MotionLock lock;
+    if (isActive()) {
+      g_lastWsStatusMs = now;
+      wsBroadcastStatus();
+    }
   }
   if (now - g_lastWsHeartbeatMs >= 5000) {
     g_lastWsHeartbeatMs = now;
@@ -1367,7 +1390,7 @@ void setup() {
         "this device is reachable beyond your own bench.");
   }
 
-  g_apiQueue.begin();
+  g_motionMutex = xSemaphoreCreateMutex();
 
   // true = format the filesystem if it's missing/corrupt, which is
   // the normal case on a brand-new board's very first boot (there's
@@ -1434,7 +1457,10 @@ void loop() {
   while (Serial.available()) {
     char c = static_cast<char>(Serial.read());
     if (c == '\n') {
-      handleCommand(g_lineBuffer);
+      {
+        MotionLock lock;
+        handleCommand(g_lineBuffer);
+      }
       g_lineBuffer = "";
     } else if (c == '\r') {
       // ignore -- part of a \r\n line ending, not real content
@@ -1459,6 +1485,7 @@ void loop() {
   if (now - g_lastTickMs >= CONTROL_TICK_MS) {
     double dtS = (now - g_lastTickMs) / 1000.0;
     g_lastTickMs = now;
+    MotionLock lock;
     controlTick(dtS);
   }
 

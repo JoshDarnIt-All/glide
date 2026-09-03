@@ -159,10 +159,10 @@ firmware/          PlatformIO project (ESP32, Arduino framework)
                     so it can be unit-tested on the laptop, not just on-device
   lib/config/       config.json persistence (LittleFS + ArduinoJson) —
                     axis config + named presets, schema_version'd
-  lib/api/          REST/WebSocket/OTA plumbing (M3): command_queue,
-                    wifi_setup, ota_handler — see firmware/src/main.cpp
-                    for the actual route handlers wiring these into
-                    motion state
+  lib/api/          REST/WebSocket/OTA plumbing (M3): wifi_setup,
+                    ota_handler — see firmware/src/main.cpp for the
+                    actual route handlers (synchronous, guarded by a
+                    mutex against loop()'s own motion-state access)
   test/             unit tests for lib/motion (and later lib/api)
 webui/              Vite build; output is gzipped and flashed alongside firmware
 hardware/           wiring diagrams, BOM, CAD, and the donor-rail inspection doc

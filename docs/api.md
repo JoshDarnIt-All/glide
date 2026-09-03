@@ -34,13 +34,21 @@ same process used for every prior milestone's decisions.
   directly jitter `controlTick()`'s 20ms S-curve velocity-following —
   precisely the stutter M1 was built to eliminate. This is a hard
   constraint, not a style preference.
-- **Command dispatch:** HTTP/WebSocket handlers run in a different
-  task/execution context than `loop()`. They never touch motion
-  globals (`g_posAMm`, `g_presets`, etc.) directly — they enqueue a
-  command, and `loop()` drains and applies it each tick, reusing the
-  exact dispatch logic `handleCommand()` already uses for serial. REST
-  and WebSocket become "just another input source," not a second
-  control path with its own race conditions.
+- **Command dispatch:** HTTP handlers run *synchronously*, on
+  AsyncTCP's own task, and reuse the exact `handleCommand()` dispatch
+  logic serial already uses (via `runCommandForApi()`) — REST becomes
+  "just another input source," not a second control path with its own
+  bugs. **Revised from the original design**, which deferred each
+  handler's actual work into a queue drained from `loop()`, specifically
+  to avoid touching motion globals from AsyncTCP's task at all — that
+  broke on real hardware, because ESPAsyncWebServer requires
+  `request->send()` to be called synchronously, before the handler
+  function returns (confirmed via its own "Handler did not handle the
+  request" fallback, hit on every route). Thread safety against
+  `loop()`'s own motion-state access (serial dispatch, `controlTick()`)
+  now comes from a mutex (`g_motionMutex`/`MotionLock` in
+  `firmware/src/main.cpp`) held for the duration of each handler's
+  actual state access, not from deferring the work to another time.
 - **WiFi provisioning:** `WiFiManager` — device tries saved
   credentials, falls back to its own AP + captive portal if none
   work, saves what you enter, reboots connected. WiFi credentials live
