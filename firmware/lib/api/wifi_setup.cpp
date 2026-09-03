@@ -92,4 +92,12 @@ bool wifiSetupBegin() {
   return connected;
 }
 
+void wifiForgetAndRestart() {
+  WiFiManager wm;
+  wm.resetSettings();
+  Serial.println("WiFi credentials cleared -- restarting into setup portal");
+  delay(500);  // let the log line and any pending HTTP response actually flush
+  ESP.restart();
+}
+
 }  // namespace glide

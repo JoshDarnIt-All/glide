@@ -84,6 +84,12 @@
 #define GLIDE_OTA_KEY "glide-default-ota-key-change-me"
 #endif
 
+// M4: shown on the Device screen and returned from GET /api/v1/wifi.
+// Manually maintained, not derived from git -- bump it when a change
+// is worth a user seeing it changed (a real OTA update, a meaningful
+// behavior change), not on every commit.
+constexpr const char *GLIDE_FIRMWARE_VERSION = "0.4.0-m4";
+
 using glide::AxisConfig;
 using glide::buildSCurveProfile;
 using glide::clampToSoftLimits;
@@ -638,6 +644,7 @@ String buildWifiJson() {
   doc["ssid"] = WiFi.SSID();
   doc["rssi"] = WiFi.RSSI();
   doc["ip"] = WiFi.localIP().toString();
+  doc["firmware_version"] = GLIDE_FIRMWARE_VERSION;
   String out;
   serializeJson(doc, out);
   return out;
@@ -1244,6 +1251,35 @@ void setupApiRoutes() {
     // needed, they're managed by the WiFi stack, not loop().
     request->send(200, "application/json", buildWifiJson());
   });
+
+  // M4: Device screen actions. Both restart the device outright, so
+  // both are rejected while anything is moving (409 MOVING) -- same
+  // "disruptive action requires idle first" reasoning as OTA, just
+  // without OTA's auth requirement: restarting into working firmware,
+  // or into the setup portal, isn't the same brick-the-device risk a
+  // bad OTA image is, so this stays in the general no-auth API.
+  g_apiServer.on("/api/v1/restart", HTTP_POST, [](AsyncWebServerRequest *request) {
+    MotionLock lock;
+    if (isActive()) {
+      request->send(409, "application/json", "{\"error\":\"MOVING\"}");
+      return;
+    }
+    request->send(200, "application/json", "{\"ok\":true}");
+    delay(500);  // let the response actually flush before rebooting
+    ESP.restart();
+  });
+
+  g_apiServer.on("/api/v1/wifi/forget", HTTP_POST,
+                 [](AsyncWebServerRequest *request) {
+                   MotionLock lock;
+                   if (isActive()) {
+                     request->send(409, "application/json",
+                                   "{\"error\":\"MOVING\"}");
+                     return;
+                   }
+                   request->send(200, "application/json", "{\"ok\":true}");
+                   glide::wifiForgetAndRestart();  // never returns
+                 });
 
   // ---- Preset-name-parameterized routes ----
   // Matched with ESPAsyncWebServer's regex URL support ("^...$" pattern

@@ -27,4 +27,11 @@ namespace glide {
 // control keeps working), just without REST/WebSocket reachable.
 bool wifiSetupBegin();
 
+// M4: clears WiFiManager's saved credentials and restarts the device
+// -- it'll come back up in the "Glide-Setup" portal on next boot,
+// exactly like a brand-new device. Never returns (ends in
+// ESP.restart()); callers should send their HTTP response BEFORE
+// calling this, not after.
+void wifiForgetAndRestart();
+
 }  // namespace glide

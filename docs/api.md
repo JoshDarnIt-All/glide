@@ -120,8 +120,10 @@ directly — no translation layer.
 | `DELETE /presets/:name` | `DELETEPRESET` | |
 | `POST /config/save` | `SAVECONFIG` | Persists axis config + all presets to flash |
 | `GET /status` | `STATUS` | Full snapshot — see below |
-| `GET /wifi` | — | `{ssid, rssi, ip}` |
+| `GET /wifi` | — | `{ssid, rssi, ip, firmware_version}` |
 | `POST /ota` | — | Multipart `.bin` upload; requires `X-Glide-OTA-Key`; rejected with `OTA_IN_PROGRESS`/`MOVING` per the interlock below |
+| `POST /restart` | — | Restarts the device (M4 Device screen). No body. Rejected with `409 MOVING` while anything is active — reboots into working firmware, so no auth needed (unlike `/ota`, this can't brick the device) |
+| `POST /wifi/forget` | — | Clears saved WiFi credentials and restarts into the setup portal (M4 Device screen). No body. Same `409 MOVING` interlock as `/restart` |
 
 ### `GET /status` response shape
 
