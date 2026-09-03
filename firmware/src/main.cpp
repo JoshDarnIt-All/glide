@@ -835,13 +835,26 @@ void handleCommand(String line) {
       printErr("OTA_IN_PROGRESS");
       return;
     }
-    // Reject rather than silently no-op: before this check existed, a
-    // MOVETO issued while the A-B-A loop was running set
+    // Reject only if the A-B-A LOOP is running -- before this check
+    // existed at all, a MOVETO issued while the loop was running set
     // g_directMoveActive true, but controlTick()'s loop-takes-priority
     // branch meant it was never actually acted on -- the command
     // replied OK and nothing happened. Matches docs/api.md's `409
     // MOVING` contract for the REST equivalent.
-    if (isActive()) {
+    //
+    // Deliberately NOT checking g_directMoveActive here (an earlier
+    // version of this check used the broader isActive(), which also
+    // covers direct moves) -- that conflict doesn't exist for two
+    // direct moves back to back: beginDirectMove() always computes a
+    // fresh profile from wherever the carriage actually is right now,
+    // the same smooth-retarget behavior LOADPRESET already relies on
+    // to interrupt-and-go. Blocking a JOG because the PREVIOUS jog
+    // hadn't finished its own short move yet made rapid repeated
+    // jogging (tap-tap-tap, or a press-and-hold sending jogs on an
+    // interval) feel broken -- confirmed on real hardware: holding the
+    // Control screen's jog button got stuck reporting MOVING instead
+    // of just continuing to nudge.
+    if (g_loopRunner.isRunning()) {
       printErr("MOVING");
       return;
     }
@@ -855,7 +868,7 @@ void handleCommand(String line) {
       printErr("OTA_IN_PROGRESS");
       return;
     }
-    if (isActive()) {
+    if (g_loopRunner.isRunning()) {
       printErr("MOVING");
       return;
     }
@@ -1475,13 +1488,34 @@ void setupApiRoutes() {
 // handler (on AsyncTCP's task) is writing it.
 void apiTick() {
   unsigned long now = millis();
-  if (now - g_lastWsStatusMs >= 100) {
+
+  // Edge-triggered on top of the periodic push below -- a real bug
+  // found on real hardware: a direct MOVETO/JOG (or a non-repeating
+  // loop) finishing on its own happens entirely inside controlTick(),
+  // with no handleCommand() call at that instant (unlike an explicit
+  // STOP, which does go through handleCommand() and already gets a
+  // broadcast from its trailing wsBroadcastStatus() call). Since the
+  // periodic push below only fires while isActive() is true, the very
+  // last thing a client saw was "MOVING" -- moving to false never got
+  // announced, so the web UI stayed stuck showing "Moving" until some
+  // unrelated command (e.g. tapping Stop) incidentally triggered a
+  // fresh broadcast. Tracking the falling edge here and forcing one
+  // more broadcast exactly at that transition covers every reason
+  // isActive() might drop to false, not just the specific ones already
+  // found.
+  static bool wasActive = false;
+
+  {
     MotionLock lock;
-    if (isActive()) {
+    bool active = isActive();
+    bool justBecameInactive = wasActive && !active;
+    wasActive = active;
+    if (justBecameInactive || (active && now - g_lastWsStatusMs >= 100)) {
       g_lastWsStatusMs = now;
       wsBroadcastStatus();
     }
   }
+
   if (now - g_lastWsHeartbeatMs >= 5000) {
     g_lastWsHeartbeatMs = now;
     if (g_apiWs.count() > 0) {

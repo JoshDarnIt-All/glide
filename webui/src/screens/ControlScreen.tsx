@@ -1,4 +1,4 @@
-import { useEffect } from "preact/hooks";
+import { useEffect, useRef } from "preact/hooks";
 import { api } from "../api";
 import {
   status,
@@ -17,9 +17,68 @@ import { ClampToast } from "../components/ClampToast";
 import { ChevronLeft, ChevronRight, GlideMark, PlayFillIcon, StopFillIcon, WifiIcon } from "../icons";
 
 // A quick nudge, not precision positioning -- precise A/B placement
-// happens in the Preset Editor's jog-and-set flow. 5mm keeps a single
-// tap meaningful without needing press-and-hold on this screen.
+// happens in the Preset Editor's jog-and-set flow.
 const CONTROL_JOG_STEP_MM = 5;
+// A quick tap fires exactly one CONTROL_JOG_STEP_MM nudge; holding
+// past this threshold switches to continuous jogging (repeated small
+// moves every JOG_HOLD_INTERVAL_MS) until released -- confirmed with
+// Josh on real hardware: a single fixed-distance jog per tap felt
+// right for small nudges, but reaching further meant a lot of
+// re-tapping, and he specifically didn't want to deal with a separate
+// Stop tap for that (this screen already has one, but wants jog itself
+// to be "moving while held, stopped when released").
+const JOG_HOLD_THRESHOLD_MS = 220;
+const JOG_HOLD_INTERVAL_MS = 150;
+
+// Not disabled by `busy` (unlike every other action button on this
+// screen) -- disabling mid-hold would stop this button from ever
+// receiving the pointerup/pointerleave that's supposed to end the
+// hold, since a real <button disabled> stops receiving pointer events
+// entirely. Each jog call retargets smoothly from wherever the
+// carriage actually is (see the firmware's MOVETO/JOG handlers), so
+// firing several in a row -- tap-tap-tap or a held interval -- is
+// safe by design, not just tolerated.
+function useJogHold(deltaMm: number) {
+  const holdTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const holding = useRef(false);
+
+  function start() {
+    holding.current = false;
+    tapTimer.current = setTimeout(() => {
+      holding.current = true;
+      void api.jog(deltaMm);
+      holdTimer.current = setInterval(() => void api.jog(deltaMm), JOG_HOLD_INTERVAL_MS);
+    }, JOG_HOLD_THRESHOLD_MS);
+  }
+
+  function clearTimers() {
+    if (tapTimer.current) {
+      clearTimeout(tapTimer.current);
+      tapTimer.current = null;
+    }
+    if (holdTimer.current) {
+      clearInterval(holdTimer.current);
+      holdTimer.current = null;
+    }
+  }
+
+  function stop() {
+    const wasHolding = holding.current;
+    clearTimers();
+    holding.current = false;
+    if (!wasHolding) {
+      // Released before the hold threshold fired -- treat as a tap.
+      void api.jog(deltaMm);
+    }
+  }
+
+  // Unmount cleanup only -- must NOT fire a tap-jog (stop() would),
+  // just stop whatever timer might still be running.
+  useEffect(() => clearTimers, []);
+
+  return { start, stop };
+}
 
 export function ControlScreen() {
   const s = status.value;
@@ -37,6 +96,9 @@ export function ControlScreen() {
   const posB = lc?.pos_b_mm ?? 0;
   const span = Math.abs(posB - posA) || 1;
   const trackPercent = Math.max(0, Math.min(100, ((positionMm - Math.min(posA, posB)) / span) * 100));
+
+  const jogLeft = useJogHold(-CONTROL_JOG_STEP_MM);
+  const jogRight = useJogHold(CONTROL_JOG_STEP_MM);
 
   return (
     <div class="screen">
@@ -75,16 +137,22 @@ export function ControlScreen() {
       <div class="grid-2">
         <button
           class="btn btn-panel press"
-          disabled={!ready || busy}
-          onClick={() => api.jog(-CONTROL_JOG_STEP_MM)}
+          disabled={!ready}
+          onPointerDown={jogLeft.start}
+          onPointerUp={jogLeft.stop}
+          onPointerLeave={jogLeft.stop}
+          onPointerCancel={jogLeft.stop}
         >
           <ChevronLeft size={22} />
           <span>Jog</span>
         </button>
         <button
           class="btn btn-panel press"
-          disabled={!ready || busy}
-          onClick={() => api.jog(CONTROL_JOG_STEP_MM)}
+          disabled={!ready}
+          onPointerDown={jogRight.start}
+          onPointerUp={jogRight.stop}
+          onPointerLeave={jogRight.stop}
+          onPointerCancel={jogRight.stop}
         >
           <span>Jog</span>
           <ChevronRight size={22} />
