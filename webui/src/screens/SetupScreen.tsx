@@ -14,6 +14,7 @@ export function SetupScreen() {
   const [stepsInput, setStepsInput] = useState("");
   const [travelSaved, setTravelSaved] = useState(false);
   const [stepsSaved, setStepsSaved] = useState(false);
+  const [homeSaved, setHomeSaved] = useState(false);
 
   useEffect(() => {
     void refreshAxis();
@@ -21,6 +22,19 @@ export function SetupScreen() {
 
   const currentTravel = axis.value?.travel_mm;
   const currentSteps = axis.value?.steps_per_mm;
+
+  // The checkmark badge alone isn't real confirmation -- it only
+  // visibly changes the FIRST time you home each session; tapping
+  // "Re-set Home Here" afterward (the whole point of "re-set") leaves
+  // the badge already showing done, so there was nothing to actually
+  // tell you it worked. Flash text the same way Travel/Steps already
+  // confirm a save, regardless of whether the badge itself changes.
+  async function setHome() {
+    const r = await api.home();
+    if (!("error" in r)) {
+      flashSaved(setHomeSaved);
+    }
+  }
 
   async function saveTravel() {
     const v = parseFloat(travelInput);
@@ -68,8 +82,8 @@ export function SetupScreen() {
           <div class="step-body">
             Zero reference set this session. Not saved across reboots — required fresh every time.
           </div>
-          <button class="btn btn-ghost press" style={{ width: "100%", height: "48px" }} onClick={() => api.home()}>
-            {homed ? "Re-set Home Here" : "Set Home Here"}
+          <button class="btn btn-ghost press" style={{ width: "100%", height: "48px" }} onClick={setHome}>
+            {homeSaved ? "Home Set ✓" : homed ? "Re-set Home Here" : "Set Home Here"}
           </button>
         </div>
 
