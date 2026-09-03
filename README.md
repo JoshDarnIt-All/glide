@@ -120,10 +120,11 @@ one actually works, not just "mostly works."
 - **M3 — WiFi provisioning, REST, WebSocket, OTA.** Also: generic-HTTP
   Companion presets, so Companion integration is possible via plain
   HTTP requests even before the dedicated Companion module exists.
-  WiFi provisioning, REST (reads and writes), and WebSocket are
-  confirmed working on real hardware; OTA is written but not yet
-  hardware-tested (see `docs/api.md`'s bring-up checklist for status
-  and the real bugs bring-up caught). WiFiManager for provisioning,
+  WiFi provisioning, REST (reads and writes), WebSocket, and OTA are
+  all confirmed working on real hardware, OTA verified with a full
+  round trip (uploaded, device rebooted itself, came back up healthy
+  on the new image) — see `docs/api.md`'s bring-up checklist for the
+  real bugs that session caught. WiFiManager for provisioning,
   ESPAsyncWebServer to avoid jittering the motion control tick, and a
   mutual-exclusion safety interlock between OTA and motion. REST
   handlers run synchronously on AsyncTCP's own task and respond

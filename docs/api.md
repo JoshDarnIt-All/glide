@@ -280,13 +280,16 @@ though percent-encoding technically works.
 M3 was written in an environment with no ESP32 toolchain (only
 `firmware/lib/motion`'s native tests could actually be compiled and
 run — see `firmware/test/test_motion`), so this checklist is what
-actually walked it onto real hardware, including three real bugs it
+actually walked it onto real hardware, including several real bugs it
 caught that no amount of code review would have (see "Real bugs found
 during hardware bring-up" below).
 
-**Status as of the bring-up session (2026-09-03): WiFi provisioning,
-REST (reads and writes), and WebSocket are all confirmed working on
-real hardware. OTA is written but not yet tested.**
+**Status as of the bring-up session (2026-09-03): all of M3 — WiFi
+provisioning, REST (reads and writes), WebSocket, and OTA — is
+confirmed working on real hardware.** OTA was verified with a full
+round trip: uploaded the running image back onto itself, the device
+rebooted on its own, and came back up healthy (WiFi reconnected, REST/
+WebSocket API listening again) on the newly-flashed image.
 
 **Before building:**
 
@@ -348,11 +351,23 @@ confirms a layer works before testing the next):**
    receive a `{"type":"heartbeat",...}` frame every ~5s even with
    nothing moving, and `{"type":"status",...}` frames while a move is
    active. Confirmed working — heartbeats arrived exactly 5s apart.
-5. ⬜ **OTA, next up** — this one reboots the device, so confirm everything
+5. ✅ **OTA** — this one reboots the device, so confirm everything
    else works first:
    `curl -X POST http://glide.local/api/v1/ota -H "X-Glide-OTA-Key: <your key>" -F "firmware=@.pio/build/esp32dev/firmware.bin"`.
    Have a USB cable within reach in case a bad image needs recovering
-   via a wired re-flash.
+   via a wired re-flash. Confirmed working — full round trip (upload,
+   `{"ok":true}`, device reboots itself, comes back up healthy on the
+   new image). Two things to know, not bugs:
+   - The `X-Glide-OTA-Key` header value must match `secrets.h`'s
+     `GLIDE_OTA_KEY` **exactly, including capitalization** — the
+     comparison is case-sensitive, and a mismatched-case key returns
+     `{"error":"UNAUTHORIZED"}`.
+   - If `glide.local` briefly fails to resolve mid-session (a local
+     mDNS/Bonjour cache hiccup, not a device problem — the device
+     itself was still running fine when this happened), retry once or
+     use the device's IP directly (shown at boot and via
+     `GET /api/v1/wifi`) as a quick way to confirm the device itself is
+     still up before troubleshooting further.
 
 ## Real bugs found during hardware bring-up (worth remembering as lessons)
 
