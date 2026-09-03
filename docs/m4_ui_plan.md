@@ -117,23 +117,102 @@ endurance). Duplicate-then-tweak from the Library is a first-class
 entry point, not just "new from scratch" — the realistic workflow on
 set.
 
-## Open questions for Josh (not yet decided)
+## Decisions locked for M4 (confirmed with Josh, not picked silently)
 
-- **Preview-before-move:** no preview for ordinary recalls (matches
-  the "one tap, confident" premise), but is a one-time "this will move
-  the carriage" confirmation worth adding specifically on the very
-  first move after homing each session?
-- **Homing depth:** is "Set Home" a single tap trusting the user
-  already jogged there, or a guided jog-then-confirm sub-flow?
-- **Loop control granularity:** does v1 need real pause (not just
-  stop) for a running loop, or is stop-then-restart enough?
-- **Multi-tab/multi-client:** if two browser tabs/devices connect
-  simultaneously, does last-command-wins silently, or does the UI need
-  "someone else is controlling this" awareness? Not required for v1,
-  but worth deciding before it surprises someone on set.
-- **Preset organization at scale:** flat list is fine for v1
-  (single axis, hand-curated names) — worth tags/search before that
-  becomes a real problem, or wait until it actually is one?
+- **Preview-before-move:** no confirmation, ever — including the first
+  move after homing. Consistent with the product's core premise
+  elsewhere (preset recall never confirms either); the physical e-stop
+  remains the real safety boundary, not a modal.
+- **Homing depth:** single tap, matching the existing serial `SETHOME`
+  behavior exactly (marks current position as 0mm, no sub-flow) — jog
+  controls are already visible on the same screen if repositioning
+  first is needed. **A guided jog-then-confirm sub-flow is explicitly
+  pinned as a v2 candidate**, not rejected outright.
+- **Loop control granularity:** stop-then-restart only for v1, matching
+  today's firmware exactly — `LoopRunner` has no pause concept, only
+  stop (see `firmware/lib/motion/loop_runner.h`). **Real pause/resume
+  is pinned as a v2 candidate** — it's a genuine new firmware
+  capability (resume from mid-leg? mid-dwell?), not just a UI change,
+  so it would expand a future milestone into firmware work too.
+- **Multi-tab/multi-client:** not addressed in v1 — last-command-wins
+  silently, per this doc's own original fallback suggestion. Revisit
+  if it actually surprises someone on set.
+- **Preset organization at scale:** flat list for v1 (single axis,
+  hand-curated names), per this doc's own original fallback
+  suggestion. Add tags/search only once it's a real problem, not
+  preemptively.
+
+## Technical architecture (confirmed with Josh, not picked silently)
+
+Researched and proposed by a specialist agent working from the actual
+repo state (real M3 build size, real partition table) — see the
+process note in project memory. Every real fork here was confirmed
+with Josh via explicit choice before any app code was written, same
+process as every other milestone.
+
+- **Asset delivery: embedded in the firmware app partition**, not the
+  LittleFS partition config.json/presets live on. Verified against
+  Josh's actual M3 build: the app partition is 1.875MB (`0x1E0000`,
+  per `min_spiffs.csv`), the M3 firmware (WiFi+REST+WebSocket+OTA+
+  motion, no UI) uses 1.35MB of it — leaving **~598KB of headroom**
+  for the built web UI. The LittleFS partition, by contrast, is only
+  128KB (`0x20000` — an earlier doc comment said ~190KB, which was
+  wrong and has been corrected in `firmware/platformio.ini`), and
+  storing the UI there would need an entirely separate OTA mechanism
+  built just to update it independently (the existing `/api/v1/ota`
+  only targets the app partition). Mechanism: a PlatformIO
+  `extra_scripts` build hook gzips the Vite build output and generates
+  `PROGMEM` byte arrays + a path→handler manifest automatically on
+  every build — no separate manual step. For local development, run
+  Vite's own dev server with `server.proxy` pointing `/api` and `/ws`
+  at the device's real IP, rather than developing against the embedded
+  build.
+- **Framework: Preact**, not React, vanilla JS, or Svelte. Same
+  component/hooks/JSX API as React (nothing unfamiliar to relearn) at
+  ~3-4KB gzipped versus React's ~130KB — meaningful against the ~598KB
+  budget above, especially since that budget also needs to leave room
+  for firmware to keep growing across future milestones. Target: well
+  under ~350-400KB total gzipped (JS+CSS+HTML+assets) for real margin.
+  This also constrains the visual design directly — hand-rolled/
+  minimal CSS rather than a full design-system dependency, inline SVG
+  for icons (not an icon font/library), no custom webfonts unless a
+  single small self-hosted variable-weight file. The published design
+  mockup already follows this (system fonts only, by design).
+- **State management:** a single native WebSocket connection (no
+  library) feeding a Preact Context/reducer all 5 screens read from a
+  shared hook. `status` frames merge into state; `event` frames
+  trigger one-shot UI reactions (toasts, phase-chip flips);
+  `heartbeat` only resets a liveness timer. Connection considered lost
+  after ~12-15s since the last message of any kind (matches this
+  doc's "~2 missed heartbeats" spec), triggering the full-surface
+  takeover above, with auto-reconnect on close. Mutating actions
+  (move/jog/preset CRUD/etc.) go over REST via `fetch()`; the
+  resulting state change is read back from the next WebSocket `status`
+  push, not synthesized from the REST response itself. No external
+  state-management library — overkill at this scope (5 screens, one
+  live-data stream).
+- **New tooling dependency:** Node.js/npm, for `webui/`'s own Vite/
+  Preact build — separate from the PlatformIO/C++ toolchain already
+  in use.
+
+## Visual design
+
+Published as an Artifact (see project memory for the current link) —
+a dark, high-contrast "field tool" aesthetic per this doc's own tone
+reference above ("closer to an action-camera app than a dashboard"):
+near-black surfaces for outdoor glare, a single amber accent, system
+fonts only (both a design choice and a flash-budget constraint above),
+tabular numerals on the live position readout. Covers all 5 screens
+plus every state this doc specifies: all 7 phase values with a real
+visual distinction between moving/dwelling/stopped (not just a chip
+color change), the not-homed banner, the soft-limit clamp toast, the
+persistent active-preset chip, and a dedicated full-screen
+"connection lost" takeover (a structurally different frame, not a
+smaller variant of the normal screen). Static mockup, not an
+interactive prototype — the environment that built it lacked the JS
+runtime Claude Design's live canvas needs to seed, so this is a
+one-time limitation of that build, not a statement about the final
+app's interactivity.
 
 ## Grounding in the confirmed M3 API
 
