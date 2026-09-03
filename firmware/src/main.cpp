@@ -246,8 +246,17 @@ void wsBroadcastEvent(const char *event, const String &extraJson = "");
 // "just another input source" rather than a second control path (see
 // docs/api.md's architecture section) -- every mutating REST endpoint
 // below ultimately calls this with a serial-equivalent command string.
+// No default member initializers here on purpose -- this ESP32
+// Arduino toolchain compiles below the C++14 rule that lets an
+// aggregate keep default member initializers (see the file-header
+// note on std::clamp for the same class of "toolchain default is
+// older than expected" issue). A struct with a default member
+// initializer stops being a plain aggregate on this compiler, which
+// broke every `CommandResult{ok, detail}`-style construction below
+// with "no matching constructor." Plain members instead: every
+// construction site here already supplies both values explicitly.
 struct CommandResult {
-  bool ok = false;
+  bool ok;
   String detail;  // "" for a bare OK, or the ERR reason
 };
 CommandResult runCommandForApi(const String &line) {
