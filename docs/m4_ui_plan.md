@@ -141,6 +141,22 @@ set.
   hand-curated names), per this doc's own original fallback
   suggestion. Add tags/search only once it's a real problem, not
   preemptively.
+- **Draggable live-position slider** (requested after using the real
+  v1 build): a slider representing current position that can be
+  dragged to set A/B or jog directly. **Pinned as a v2 candidate** —
+  Josh wants v1 solid first. Two implementation options were discussed
+  and neither is decided yet: (1) drag-then-release-to-commit (a
+  single `MOVETO` on release, low risk, consistent with this UI's
+  existing "Target, not Position" honesty principle since there's no
+  position encoder), or (2) live-follow-while-dragging (the carriage
+  tracks the drag in real time — more satisfying, but needs real
+  tuning on how often to send move commands so it doesn't feel jerky).
+  Recommendation when this gets picked up: build (1) first, try it on
+  the rail, only reach for (2) if (1) feels unsatisfying in practice.
+  Note: typing an exact mm value for A/B already exists today, in the
+  Preset Editor's collapsed "Advanced: type an exact mm value"
+  disclosure — this was a real feature Josh didn't realize was already
+  built, not a gap.
 
 ## Technical architecture (confirmed with Josh, not picked silently)
 
