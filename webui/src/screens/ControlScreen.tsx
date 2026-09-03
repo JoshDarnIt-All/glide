@@ -94,7 +94,16 @@ export function ControlScreen() {
   const s = status.value;
   const lc = loopConfig.value;
   const homed = s?.homed ?? false;
-  const ready = homed && (s?.travel_set ?? false) && (s?.calibrated ?? false);
+  const travelAndCalibrated = (s?.travel_set ?? false) && (s?.calibrated ?? false);
+  const ready = homed && travelAndCalibrated;
+  // Jog specifically doesn't need `homed` -- it's a relative move, so
+  // it doesn't need a home reference the way absolute moves (Go to A/
+  // B, Start Loop) do, and matches the firmware's own readiness gate
+  // for JOG (see docs/serial_protocol.md). This is what actually lets
+  // you jog a carriage that ended up somewhere inconvenient after a
+  // power cycle to a safe spot BEFORE setting home there -- the exact
+  // workflow the banner below already describes.
+  const jogReady = travelAndCalibrated;
   const busy = isBusy.value;
   const positionMm = s?.position_mm ?? 0;
 
@@ -166,7 +175,7 @@ export function ControlScreen() {
       <div class="grid-2">
         <button
           class="btn btn-panel press"
-          disabled={!ready}
+          disabled={!jogReady}
           onPointerDown={jogLeft.start}
           onPointerUp={jogLeft.stop}
           onPointerLeave={jogLeft.stop}
@@ -177,7 +186,7 @@ export function ControlScreen() {
         </button>
         <button
           class="btn btn-panel press"
-          disabled={!ready}
+          disabled={!jogReady}
           onPointerDown={jogRight.start}
           onPointerUp={jogRight.stop}
           onPointerLeave={jogRight.stop}

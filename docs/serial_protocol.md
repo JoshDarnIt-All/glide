@@ -105,9 +105,8 @@ interface but stops being the primary way to control the device.
 
 ## Readiness gates
 
-Three independent conditions must all be true before `MOVETO`, `JOG`,
-or `LOOPSTART` will do anything — each fails with a specific `ERR` so
-it's clear which one is missing:
+Three independent conditions gate motion — each fails with a specific
+`ERR` so it's clear which one is missing:
 
 | Gate | Set by | Error if missing |
 |---|---|---|
@@ -115,12 +114,24 @@ it's clear which one is missing:
 | Travel range set | `SETTRAVEL <mm>` | `ERR TRAVEL_NOT_SET` |
 | Calibrated | `SETSTEPSPERMM <value>` | `ERR NOT_CALIBRATED` |
 
-Reasoning: at boot, position 0 is meaningless until home is set, the
-travel range is meaningless until it's configured (defaulting to 0
-would silently clamp every move to a single point), and any mm value
-is meaningless until the mm↔step conversion is known. Rather than let
-any of these silently default to something plausible-looking but
-wrong, each is a hard gate.
+`MOVETO` and `LOOPSTART` require all three. **`JOG` requires only
+travel range + calibration, not homing** — a real fix, not the
+original design: `JOG` is a relative move from wherever the carriage
+currently is, so it doesn't need a home reference the way an absolute
+`MOVETO` target does, and jogging to a safe spot before homing is
+often the whole point (e.g. the carriage ended up somewhere
+inconvenient after a power cycle). Travel range and calibration are
+still required for `JOG` since they're what let a relative mm delta
+and the soft-limit clamp mean anything at all — and both normally
+persist across reboots via `config.json`, unlike home, so this
+typically isn't a second gate to clear in practice.
+
+Reasoning for the two still-required gates: the travel range is
+meaningless until it's configured (defaulting to 0 would silently
+clamp every move to a single point), and any mm value is meaningless
+until the mm↔step conversion is known. Rather than let either silently
+default to something plausible-looking but wrong, both are hard
+gates.
 
 ## Commands
 

@@ -83,7 +83,7 @@ Reuses the existing serial `ERR` vocabulary (see
 
 | `error` | HTTP status | Meaning |
 |---|---|---|
-| `NOT_HOMED` | 409 | `POST /api/v1/home` hasn't been called this session |
+| `NOT_HOMED` | 409 | `POST /api/v1/home` hasn't been called this session — does **not** apply to `POST /jog`, which only needs travel range + calibration (see `docs/serial_protocol.md`'s readiness gates) |
 | `TRAVEL_NOT_SET` | 409 | Travel range not configured |
 | `NOT_CALIBRATED` | 409 | Steps-per-mm not configured |
 | `ALREADY_RUNNING` | 409 | Loop already active |

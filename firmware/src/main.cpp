@@ -863,7 +863,21 @@ void handleCommand(String line) {
     printOk();
 
   } else if (verb == "JOG") {
-    if (!requireReady()) return;
+    // Deliberately NOT requireHomed() here, unlike MOVETO -- JOG is a
+    // RELATIVE move from wherever the carriage currently is, so it
+    // doesn't need a home reference to be meaningful the way an
+    // absolute MOVETO target does. This matters in practice: if the
+    // carriage is sitting somewhere inconvenient after a power cycle,
+    // jogging it to a safe spot is the whole reason to jog BEFORE
+    // homing, then set home once it's there -- exactly what the
+    // web UI's own not-homed banner already says ("Jog to a safe
+    // reference point, then set home to unlock motion"), which the
+    // firmware wasn't actually honoring until this fix. Still
+    // requires travel range + calibration, since those are what let a
+    // relative mm delta and the soft-limit clamp mean anything at all
+    // (and both normally persist across reboots via config.json,
+    // unlike home).
+    if (!requireTravel() || !requireCalibrated()) return;
     if (glide::otaInProgress()) {
       printErr("OTA_IN_PROGRESS");
       return;
