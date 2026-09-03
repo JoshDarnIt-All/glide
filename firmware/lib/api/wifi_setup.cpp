@@ -42,6 +42,16 @@ void beginMdns() {
 
 bool wifiSetupBegin() {
   bool connected = false;
+  // True only if WiFiManager's own captive-portal web server actually
+  // ran -- that server also binds port 80. It's torn down internally
+  // once autoConnect() returns, but confirmed on real hardware that
+  // the OS/LWIP doesn't always release the port instantly: starting
+  // the REST API's AsyncWebServer right after can fail to bind
+  // ("[E][AsyncTCP.cpp] begin(): bind error: -8", i.e. address already
+  // in use) if this path was taken. Only matters the first time (or
+  // after a WiFi reset) -- once a network is saved, later boots skip
+  // the portal entirely and this never applies.
+  bool usedConfigPortal = false;
 
 #ifdef GLIDE_WIFI_SSID
   connected = tryHardcodedCredentials();
@@ -60,6 +70,7 @@ bool wifiSetupBegin() {
     // doesn't jitter anything.
     wm.setConfigPortalTimeout(180);
     connected = wm.autoConnect("Glide-Setup");
+    usedConfigPortal = true;
   }
 
   if (connected) {
@@ -68,6 +79,9 @@ bool wifiSetupBegin() {
     Serial.print(" (");
     Serial.print(WiFi.localIP());
     Serial.println(")");
+    if (usedConfigPortal) {
+      delay(1000);  // let WiFiManager's portal server actually release port 80
+    }
     beginMdns();
   } else {
     Serial.println(
