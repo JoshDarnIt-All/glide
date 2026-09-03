@@ -214,6 +214,60 @@ runtime Claude Design's live canvas needs to seed, so this is a
 one-time limitation of that build, not a statement about the final
 app's interactivity.
 
+## Implementation status
+
+**Written, not yet built or hardware-verified.** The full app exists
+at `webui/` (Preact + TypeScript + Vite, per the architecture above)
+implementing all 5 screens and every state this doc specifies, plus
+three small firmware additions needed to back the Device screen
+faithfully: `POST /api/v1/restart`, `POST /api/v1/wifi/forget`, and a
+`firmware_version` field on `GET /api/v1/wifi` (all documented in
+`docs/api.md`). The embed-into-firmware pipeline
+(`firmware/scripts/embed_webui.py`) and its `main.cpp` integration are
+written too.
+
+**Neither Node.js/npm nor the ESP32 toolchain were available in the
+environment that wrote this** — `npm run build`, the embed pipeline,
+and the PlatformIO build have never actually been run. Everything was
+checked as thoroughly as possible without a compiler (import/export
+cross-referencing by hand, structural brace/paren balance across every
+file, a real bug found and fixed this way: an unused import that would
+have failed `tsc`'s `noUnusedLocals` check). Treat this the same way
+M3's first hardware pass was treated — expect to find and fix real
+issues on the first actual build, not a sign anything was done
+carelessly.
+
+**Requires Node.js/npm installed** (separate from the PlatformIO/C++
+toolchain already in use) to build `webui/` at all — see
+`webui/README.md` for setup.
+
+## First build / bring-up checklist
+
+1. Install Node.js/npm if not already present (e.g. from
+   nodejs.org — any current LTS version).
+2. `cd webui && npm install` — first-time only, or after a
+   dependency changes.
+3. `npm run build` from within `webui/` — this is the first real test
+   of the TypeScript/Preact code and should be done *before* touching
+   PlatformIO, so a webui-side error doesn't get confused with a
+   firmware-side one. Report the exact error if this fails; it's
+   likely a real bug in code that was never compiler-checked.
+4. Once that succeeds, build the firmware as usual (PlatformIO's
+   Build button, or `pio run -e esp32dev`) — the `embed_webui.py` hook
+   runs `npm run build` again automatically and embeds the result, so
+   step 3 isn't strictly required first, but isolates which side a
+   failure is on.
+5. Flash and open the device's IP or `glide.local` in a browser. If
+   you see "Web UI not built into this firmware image," the embed step
+   silently fell back to its placeholder (check the build log's
+   `[embed_webui]` lines for why — most likely Node/npm weren't found
+   on PATH from PlatformIO's build environment specifically, which can
+   differ from your regular terminal's PATH).
+6. Click through all 5 screens and exercise the real device: home,
+   set travel/calibration, jog, set A/B, start a loop, save/recall/
+   delete a preset, and — last, since it reboots the device — try an
+   OTA update and the Device screen's Restart/Forget Network actions.
+
 ## Grounding in the confirmed M3 API
 
 This plan assumes (per `docs/api.md`): WebSocket push at ~10Hz

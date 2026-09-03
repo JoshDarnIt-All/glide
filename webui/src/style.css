@@ -1,0 +1,1049 @@
+/* Design tokens -- extracted verbatim from the approved mockup
+   (/tmp/glide-m4-design/*.dc.html). Dark "field tool" aesthetic:
+   near-black surfaces for outdoor glare, one amber accent, system
+   fonts only (flash-budget constraint, not just a style choice). */
+:root {
+  --bg: oklch(0.15 0.014 250);
+  --bg-panel: oklch(0.205 0.016 250);
+  --bg-panel-2: oklch(0.255 0.018 250);
+  --bg-panel-3: oklch(0.3 0.02 250);
+  --border: oklch(0.32 0.02 250);
+  --text: oklch(0.97 0.006 250);
+  --text-dim: oklch(0.68 0.012 250);
+  --text-dimmer: oklch(0.48 0.014 250);
+  --accent: oklch(0.74 0.15 55);
+  --accent-fg: oklch(0.18 0.03 55);
+  --danger: oklch(0.63 0.21 25);
+  --success: oklch(0.76 0.15 148);
+  --success-fg: oklch(0.18 0.03 148);
+  --warn: oklch(0.8 0.15 95);
+  --warn-fg: oklch(0.22 0.04 95);
+
+  /* Motion vocabulary -- shared durations/easings so every animation
+     in the app feels like one system, not a pile of one-off tweaks.
+     Fast+snappy: this is a field tool for a quick tap outdoors, not a
+     marketing site -- motion clarifies state changes, it never makes
+     the user wait for it. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast: 140ms;
+  --dur-base: 220ms;
+  --dur-slow: 320ms;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#app {
+  height: 100%;
+}
+body {
+  margin: 0;
+  font-family:
+    -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  color: inherit;
+  background: none;
+}
+input {
+  font-family: inherit;
+  color: var(--text);
+  outline: none;
+}
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Shared keyframes ---- */
+@keyframes pulseFast {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes pulseSlow {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes fadeRise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes toastInTop {
+  from {
+    opacity: 0;
+    transform: translateY(-12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes bannerIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    max-height: 80px;
+  }
+}
+@keyframes overlayIn {
+  from {
+    opacity: 0;
+    backdrop-filter: blur(0);
+  }
+  to {
+    opacity: 1;
+    backdrop-filter: blur(2px);
+  }
+}
+@keyframes popCheck {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.anim-active {
+  animation: pulseFast 0.9s ease-in-out infinite;
+}
+.anim-dwell {
+  animation: pulseSlow 2.4s ease-in-out infinite;
+}
+.spin {
+  animation: spin 1s linear infinite;
+}
+.fade-rise {
+  animation: fadeRise var(--dur-slow) var(--ease-out) both;
+  animation-delay: var(--stagger-delay, 0ms);
+}
+.pop-check {
+  animation: popCheck var(--dur-slow) var(--ease-out) both;
+}
+
+/* Respect a user's reduced-motion preference: every custom animation
+   in this file collapses to an instant state change, and CSS
+   transitions this stylesheet defines shrink to near-zero. This is a
+   real accessibility setting, not a style nicety, and costs nothing
+   to honor. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ---- Press feedback: every tappable control in the app uses this,
+   so touch feedback is consistent everywhere rather than left to each
+   component to reinvent. ---- */
+.press {
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out),
+    background-color var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out);
+}
+.press:active {
+  transform: scale(0.96);
+  opacity: 0.85;
+}
+.press:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* ---- App shell ---- */
+.app-shell {
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  height: 100dvh;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ---- Screen transition: a quick cross-fade + rise, not a hard cut
+   between tabs. ---- */
+.screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  animation: fadeRise var(--dur-base) var(--ease-out) both;
+}
+
+/* ---- Header ---- */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: max(env(safe-area-inset-top), 20px) 20px 10px;
+  flex-shrink: 0;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 800;
+  font-size: 17px;
+  letter-spacing: 0.5px;
+}
+.page-header {
+  padding: max(env(safe-area-inset-top), 22px) 20px 6px;
+  flex-shrink: 0;
+}
+.page-title {
+  font-weight: 800;
+  font-size: 24px;
+  letter-spacing: -0.3px;
+}
+.page-subtitle {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+/* ---- Not-homed banner ---- */
+.banner-warn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--warn-fg);
+  border: 1px solid var(--warn);
+  border-radius: 12px;
+  padding: 12px 14px;
+  animation: bannerIn var(--dur-slow) var(--ease-out) both;
+  overflow: hidden;
+}
+.banner-warn-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--warn);
+}
+.banner-warn-body {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+
+/* ---- Active preset chip ---- */
+.chip-preset {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 14px;
+  align-self: flex-start;
+  max-width: 100%;
+  transition: border-color var(--dur-base) var(--ease-out);
+}
+.chip-preset-label {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Phase chip + readout panel ---- */
+.panel-readout {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 22px 20px 26px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.phase-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  padding: 7px 16px 7px 12px;
+  transition:
+    background-color var(--dur-base) var(--ease-in-out),
+    color var(--dur-base) var(--ease-in-out);
+}
+.phase-chip-label {
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 0.6px;
+}
+.readout-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.6px;
+  color: var(--text-dimmer);
+  text-align: center;
+}
+.readout-value {
+  font-size: 64px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -1.5px;
+  margin-top: 4px;
+  text-align: center;
+  /* Smooths the live position readout itself, not just the dot on the
+     track -- a very short transition so real-time updates still feel
+     immediate, just not a hard flicker at ~10Hz. */
+  transition: color var(--dur-base) var(--ease-out);
+}
+.readout-unit {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin-left: 4px;
+}
+
+/* ---- A-B track ---- */
+.track-wrap {
+  width: 100%;
+  padding: 0 4px;
+}
+.track {
+  position: relative;
+  height: 6px;
+  background: var(--bg-panel-3);
+  border-radius: 99px;
+  margin: 0 6px;
+}
+.track-dot {
+  position: absolute;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  transform: translate(-50%, -50%);
+  background: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px oklch(0.74 0.15 55 / 0.22);
+  /* The single most important animation in the app: this must glide,
+     never jump, whenever the target position changes. */
+  transition: left var(--dur-base) linear;
+}
+.track-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+.track-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dimmer);
+  letter-spacing: 0.5px;
+}
+
+/* ---- Buttons ---- */
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 16px;
+  font-weight: 700;
+  font-size: 14px;
+}
+.btn-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.btn-accent {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 800;
+}
+.btn-danger {
+  background: var(--danger);
+  color: oklch(0.98 0.01 25);
+  font-weight: 800;
+}
+.btn-ghost {
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.btn-dashed {
+  background: var(--bg-panel-2);
+  border: 1px dashed var(--border);
+  color: var(--text-dim);
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+/* ---- Preset shortcuts (Control screen horizontal rail) ---- */
+.rail-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.rail-title {
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+}
+.rail {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.rail-card {
+  flex-shrink: 0;
+  width: 140px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  text-align: left;
+}
+.rail-card-name {
+  font-weight: 700;
+  font-size: 13.5px;
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rail-card-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ---- Toast ---- */
+.toast {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-panel-3);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: 0 8px 24px oklch(0 0 0 / 0.4);
+  animation: toastIn var(--dur-base) var(--ease-out) both;
+}
+.toast-text {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Global error toast -- viewport-fixed (works from any screen),
+   danger-tinted (unlike the neutral .toast used for soft-limit
+   clamps, which is "working as designed," not a failure). Anchored to
+   the TOP: the bottom chrome varies per screen (Control stacks a stop
+   bar under the tab bar; other screens have only the tab bar), so a
+   fixed bottom offset would collide with one or the other. */
+.error-toast {
+  position: fixed;
+  left: 20px;
+  right: 20px;
+  top: 14px;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-panel-3);
+  border: 1px solid var(--danger);
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: 0 8px 24px oklch(0 0 0 / 0.4);
+  animation: toastInTop var(--dur-base) var(--ease-out) both;
+  max-width: 440px;
+  margin: 0 auto;
+}
+
+/* ---- Fixed stop bar + tab bar ---- */
+.stop-bar {
+  flex-shrink: 0;
+  padding: 10px 20px;
+  background: var(--bg);
+}
+.btn-stop {
+  width: 100%;
+  height: 68px;
+  border-radius: 18px;
+  font-size: 18px;
+  letter-spacing: 0.5px;
+}
+.tab-bar {
+  flex-shrink: 0;
+  display: flex;
+  border-top: 1px solid var(--border);
+  padding: 10px 8px max(env(safe-area-inset-bottom), 18px);
+  background: var(--bg);
+}
+.tab-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dimmer);
+  padding: 4px 0;
+  transition: color var(--dur-base) var(--ease-out);
+}
+.tab-item.active {
+  color: var(--accent);
+}
+.tab-item span {
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+/* ---- Connection-lost takeover ---- */
+.overlay-lost {
+  position: absolute;
+  inset: 0;
+  background: oklch(0.1 0.01 250 / 0.72);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  animation: overlayIn var(--dur-slow) var(--ease-out) both;
+  z-index: 20;
+}
+.overlay-lost-title {
+  font-weight: 800;
+  font-size: 16px;
+  text-align: center;
+}
+.overlay-lost-body {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  text-align: center;
+}
+.content-degraded {
+  filter: grayscale(1) opacity(0.45);
+  transition: filter var(--dur-slow) var(--ease-out);
+}
+
+/* ---- Preset Library cards ---- */
+.preset-card {
+  position: relative;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 16px 16px 14px;
+  text-align: left;
+  width: 100%;
+  transition: border-color var(--dur-base) var(--ease-out);
+}
+.preset-card-active-tag {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: oklch(0.74 0.15 55 / 0.16);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+.preset-card-name {
+  font-weight: 800;
+  font-size: 17px;
+  margin-bottom: 10px;
+  padding-right: 70px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.preset-card-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.preset-card-stat-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--text-dimmer);
+  letter-spacing: 0.4px;
+}
+.preset-card-stat-value {
+  font-size: 13px;
+  font-weight: 700;
+  margin-top: 2px;
+}
+.preset-card-actions {
+  display: flex;
+  gap: 8px;
+}
+.icon-btn {
+  width: 46px;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+/* ---- Preset Editor ---- */
+.editor-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: max(env(safe-area-inset-top), 20px) 16px 14px;
+}
+.editor-back {
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.editor-save {
+  color: var(--accent);
+  font-weight: 800;
+  font-size: 15px;
+  padding: 8px;
+}
+.field-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-dimmer);
+  margin-bottom: 8px;
+}
+.input-block {
+  width: 100%;
+  font-size: 20px;
+  font-weight: 800;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.input-block:focus {
+  border-color: var(--accent);
+}
+.point-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 14px 16px;
+}
+.point-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.point-card-name {
+  font-weight: 800;
+  font-size: 14px;
+}
+.point-card-value {
+  font-weight: 800;
+  font-size: 16px;
+  color: var(--accent);
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.point-card-row {
+  display: flex;
+  gap: 8px;
+}
+.jog-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+}
+.set-here-btn {
+  flex: 2.4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  background: var(--accent);
+  border-radius: 11px;
+  color: var(--accent-fg);
+  font-weight: 800;
+  font-size: 13.5px;
+}
+.advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 2px 4px;
+  color: var(--text-dimmer);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.advanced-toggle svg {
+  transition: transform var(--dur-base) var(--ease-out);
+}
+.advanced-toggle.open svg {
+  transform: rotate(180deg);
+}
+.advanced-panel {
+  overflow: hidden;
+  transition:
+    max-height var(--dur-base) var(--ease-out),
+    opacity var(--dur-base) var(--ease-out);
+}
+.settings-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 0 16px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 15px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.settings-row:last-child {
+  border-bottom: none;
+}
+.settings-row-label {
+  font-weight: 600;
+  font-size: 14.5px;
+}
+.settings-row-value {
+  font-weight: 700;
+  font-size: 14.5px;
+  color: var(--text-dim);
+}
+.settings-row-stepper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.stepper-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---- Toggle switch ---- */
+.toggle {
+  width: 46px;
+  height: 27px;
+  border-radius: 99px;
+  position: relative;
+  transition: background-color var(--dur-base) var(--ease-out);
+}
+.toggle-knob {
+  position: absolute;
+  top: 2.5px;
+  left: 2.5px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--text-dimmer);
+  transition:
+    transform var(--dur-base) var(--ease-out),
+    background-color var(--dur-base) var(--ease-out);
+}
+.toggle.on {
+  background: oklch(0.74 0.15 55 / 0.3);
+}
+.toggle.on .toggle-knob {
+  transform: translateX(19px);
+  background: var(--accent);
+}
+
+/* ---- Setup screen ---- */
+.progress-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 16px;
+}
+.progress-segments {
+  display: flex;
+  gap: 5px;
+}
+.progress-segment {
+  width: 26px;
+  height: 5px;
+  border-radius: 99px;
+  background: var(--bg-panel-3);
+  transition: background-color var(--dur-slow) var(--ease-out);
+}
+.progress-segment.done {
+  background: var(--success);
+}
+.progress-text {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-dim);
+}
+.step-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 18px;
+}
+.step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.step-badge {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--bg-panel-3);
+  transition: background-color var(--dur-base) var(--ease-out);
+}
+.step-badge.done {
+  background: oklch(0.76 0.15 148 / 0.16);
+}
+.step-name {
+  font-weight: 800;
+  font-size: 15.5px;
+}
+.step-body {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 2px 0 14px 40px;
+  line-height: 1.4;
+}
+.step-hint {
+  margin: 0 0 12px 40px;
+  padding: 10px 12px;
+  background: var(--bg-panel-2);
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+.field-row {
+  display: flex;
+  gap: 8px;
+}
+.field-input {
+  flex: 1;
+  height: 46px;
+  padding: 0 14px;
+  font-size: 15px;
+  font-weight: 700;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.field-input:focus {
+  border-color: var(--accent);
+}
+.field-unit {
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-dim);
+}
+.field-save-btn {
+  width: 76px;
+  height: 46px;
+  background: var(--accent);
+  border-radius: 11px;
+  color: var(--accent-fg);
+  font-weight: 800;
+  font-size: 14px;
+}
+
+/* ---- Device screen ---- */
+.section-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-dimmer);
+  margin-bottom: 8px;
+}
+.info-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 0 16px;
+}
+.info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.info-row:last-child {
+  border-bottom: none;
+}
+.signal-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2.5px;
+  height: 14px;
+}
+.signal-bar {
+  width: 4px;
+  border-radius: 1px;
+  background: var(--bg-panel-3);
+  transition: background-color var(--dur-base) var(--ease-out);
+}
+.signal-bar.lit {
+  background: var(--text);
+}
+.mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* ---- Confirm dialog (Restart Device only -- the one action in this
+   app that intentionally confirms, so it must look and feel distinct
+   from a routine screen/card, not like an accidental default modal). ---- */
+.confirm-scrim {
+  position: fixed;
+  inset: 0;
+  background: oklch(0.05 0.01 250 / 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 50;
+  animation: overlayIn var(--dur-base) var(--ease-out) both;
+}
+.confirm-card {
+  width: 100%;
+  max-width: 340px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 24px 20px 20px;
+  text-align: center;
+  animation: toastIn var(--dur-base) var(--ease-out) both;
+}
+.confirm-title {
+  font-weight: 800;
+  font-size: 17px;
+  margin-top: 12px;
+}
+.confirm-body {
+  font-size: 13.5px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+.confirm-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+.confirm-actions .btn {
+  flex: 1;
+  height: 48px;
+}
+
+/* ---- Upload progress (OTA) ---- */
+.upload-track {
+  width: 100%;
+  height: 8px;
+  background: var(--bg-panel-3);
+  border-radius: 99px;
+  overflow: hidden;
+  margin-top: 12px;
+}
+.upload-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 99px;
+  transition: width var(--dur-base) linear;
+}

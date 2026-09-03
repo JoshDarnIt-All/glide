@@ -71,6 +71,7 @@
 #include "ota_handler.h"
 #include "scurve.h"
 #include "soft_limits.h"
+#include "webui_assets.h"
 #include "wifi_setup.h"
 
 #if __has_include("secrets.h")
@@ -1381,6 +1382,64 @@ void setupApiRoutes() {
   glide::otaRegisterRoute(g_apiServer, GLIDE_OTA_KEY, []() {
     MotionLock lock;
     return isActive();
+  });
+
+  // M4: serves the embedded web UI (firmware/lib/api/webui_assets.h,
+  // generated from webui/ by firmware/scripts/embed_webui.py) for
+  // anything that didn't match a more specific route above.
+  // onNotFound only fires when NOTHING else matched, so this can't
+  // shadow any REST endpoint registered earlier in this function.
+  //
+  // NOTE: beginResponse_P() for serving a PROGMEM byte buffer directly
+  // is written from established ESPAsyncWebServer knowledge -- this is
+  // the standard pattern for embedded web assets on ESP32, but like
+  // the rest of this file's network layer, it wasn't compile-verified
+  // in this environment (no ESP32 toolchain here). Worth checking
+  // first if this specific handler fails to compile.
+  g_apiServer.onNotFound([](AsyncWebServerRequest *request) {
+    if (request->method() != HTTP_GET) {
+      request->send(404, "application/json", "{\"error\":\"NOT_FOUND\"}");
+      return;
+    }
+    String path = request->url();
+    if (path.startsWith("/api/")) {
+      // A genuinely unmatched API route -- don't paper over a typo'd
+      // endpoint by serving HTML for it.
+      request->send(404, "application/json", "{\"error\":\"NOT_FOUND\"}");
+      return;
+    }
+
+    const glide::WebuiAsset *asset = glide::findWebuiAsset(path.c_str());
+    bool isSpaFallback = false;
+    if (!asset) {
+      // SPA fallback: any other unmatched GET (the root path, or a
+      // page refresh mid-navigation within the app's own tab state,
+      // which is signal-based, not URL-based) serves index.html so
+      // the app can take over and restore its own view.
+      asset = glide::findWebuiAsset("/index.html");
+      isSpaFallback = true;
+    }
+    if (!asset) {
+      request->send(503, "text/plain",
+                    "Web UI not built into this firmware image -- see "
+                    "firmware/scripts/embed_webui.py.");
+      return;
+    }
+
+    AsyncWebServerResponse *response =
+        request->beginResponse_P(200, asset->mimeType, asset->data, asset->length);
+    response->addHeader("Content-Encoding", "gzip");
+    // Vite hashes every built filename by content, so a genuinely new
+    // build always gets a new URL -- safe to cache those forever.
+    // index.html itself (and the SPA fallback re-using it) must never
+    // be cached that way, or a fresh firmware's index.html could stay
+    // stuck pointing at a previous build's now-gone hashed filenames.
+    if (isSpaFallback) {
+      response->addHeader("Cache-Control", "no-cache");
+    } else {
+      response->addHeader("Cache-Control", "public, max-age=31536000, immutable");
+    }
+    request->send(response);
   });
 
   g_apiServer.begin();

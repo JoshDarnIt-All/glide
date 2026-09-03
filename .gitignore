@@ -16,6 +16,11 @@ firmware/.vscode/c_cpp_properties.json
 firmware/.vscode/launch.json
 firmware/.vscode/ipch/
 
+# --- M4: auto-generated on every build by firmware/scripts/embed_webui.py --
+# never hand-edited, never committed (see firmware/lib/api/webui_assets.h
+# for the stable, hand-written interface it implements).
+firmware/lib/api/webui_assets_data.cpp
+
 # --- Node / Vite (webui) ---
 node_modules/
 webui/dist/
@@ -38,3 +43,7 @@ Thumbs.db
 *.bin
 *.elf
 *.map
+
+# --- Python (firmware/scripts/embed_webui.py, run by PlatformIO) ---
+__pycache__/
+*.pyc
