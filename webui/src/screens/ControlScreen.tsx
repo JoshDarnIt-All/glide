@@ -9,17 +9,15 @@ import {
   connected,
   refreshPresets,
 } from "../store";
-import { activeTab, editingPreset } from "../ui";
+import { activeTab, editingPreset, controlJogStepMm } from "../ui";
 import { NotHomedBanner } from "../components/NotHomedBanner";
 import { ActivePresetChip } from "../components/ActivePresetChip";
 import { PhaseChip } from "../components/PhaseChip";
 import { ClampToast } from "../components/ClampToast";
 import { ChevronLeft, ChevronRight, GlideMark, PlayFillIcon, StopFillIcon, WifiIcon } from "../icons";
 
-// A quick nudge, not precision positioning -- precise A/B placement
-// happens in the Preset Editor's jog-and-set flow.
-const CONTROL_JOG_STEP_MM = 5;
-// A quick tap fires exactly one CONTROL_JOG_STEP_MM nudge; holding
+// A quick tap fires exactly one jog-step nudge (size set by the user
+// via controlJogStepMm, see ui.ts); holding
 // past this threshold switches to continuous jogging (repeated small
 // moves every JOG_HOLD_INTERVAL_MS) until released -- confirmed with
 // Josh on real hardware: a single fixed-distance jog per tap felt
@@ -30,6 +28,15 @@ const CONTROL_JOG_STEP_MM = 5;
 const JOG_HOLD_THRESHOLD_MS = 220;
 const JOG_HOLD_INTERVAL_MS = 150;
 
+// Reads controlJogStepMm.value fresh every time a jog actually fires
+// (not once when the hold starts) -- if the user edits the jog-step
+// field mid-session, the very next tap/hold-tick already uses it, and
+// a hold that outlasts an edit doesn't finish out the old value.
+function currentJogStepMm(): number {
+  const v = controlJogStepMm.value;
+  return v > 0 ? v : 5;
+}
+
 // Not disabled by `busy` (unlike every other action button on this
 // screen) -- disabling mid-hold would stop this button from ever
 // receiving the pointerup/pointerleave that's supposed to end the
@@ -38,7 +45,7 @@ const JOG_HOLD_INTERVAL_MS = 150;
 // carriage actually is (see the firmware's MOVETO/JOG handlers), so
 // firing several in a row -- tap-tap-tap or a held interval -- is
 // safe by design, not just tolerated.
-function useJogHold(deltaMm: number) {
+function useJogHold(direction: 1 | -1) {
   const holdTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const holding = useRef(false);
@@ -47,8 +54,11 @@ function useJogHold(deltaMm: number) {
     holding.current = false;
     tapTimer.current = setTimeout(() => {
       holding.current = true;
-      void api.jog(deltaMm);
-      holdTimer.current = setInterval(() => void api.jog(deltaMm), JOG_HOLD_INTERVAL_MS);
+      void api.jog(direction * currentJogStepMm());
+      holdTimer.current = setInterval(
+        () => void api.jog(direction * currentJogStepMm()),
+        JOG_HOLD_INTERVAL_MS
+      );
     }, JOG_HOLD_THRESHOLD_MS);
   }
 
@@ -69,7 +79,7 @@ function useJogHold(deltaMm: number) {
     holding.current = false;
     if (!wasHolding) {
       // Released before the hold threshold fired -- treat as a tap.
-      void api.jog(deltaMm);
+      void api.jog(direction * currentJogStepMm());
     }
   }
 
@@ -97,8 +107,8 @@ export function ControlScreen() {
   const span = Math.abs(posB - posA) || 1;
   const trackPercent = Math.max(0, Math.min(100, ((positionMm - Math.min(posA, posB)) / span) * 100));
 
-  const jogLeft = useJogHold(-CONTROL_JOG_STEP_MM);
-  const jogRight = useJogHold(CONTROL_JOG_STEP_MM);
+  const jogLeft = useJogHold(-1);
+  const jogRight = useJogHold(1);
 
   return (
     <div class="screen">
@@ -131,6 +141,25 @@ export function ControlScreen() {
             <span class="track-label">A · {posA.toFixed(0)}mm</span>
             <span class="track-label">B · {posB.toFixed(0)}mm</span>
           </div>
+        </div>
+      </div>
+
+      <div class="rail-title-row" style={{ marginBottom: "-2px" }}>
+        <span class="rail-title">JOG STEP</span>
+        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <input
+            class="field-input"
+            style={{ width: "70px", height: "34px", fontSize: "14px", textAlign: "right" }}
+            type="number"
+            min="0.1"
+            step="1"
+            value={controlJogStepMm.value}
+            onInput={(e) => {
+              const v = parseFloat((e.target as HTMLInputElement).value);
+              controlJogStepMm.value = v > 0 ? v : controlJogStepMm.value;
+            }}
+          />
+          <span class="track-label">mm</span>
         </div>
       </div>
 
