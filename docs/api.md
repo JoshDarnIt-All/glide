@@ -326,8 +326,14 @@ confirms a layer works before testing the next):**
    instead if `glide.local` doesn't resolve — printed on the serial
    monitor too). Should return the same JSON shape shown above.
 3. **REST, a real command** — e.g.
-   `curl -X PATCH http://glide.local/api/v1/axis -d '{"travel_mm":500}'`
-   then `curl http://glide.local/api/v1/axis` to confirm it stuck.
+   `curl -X PATCH http://glide.local/api/v1/axis -H "Content-Type: application/json" -d '{"travel_mm":500}'`
+   then `curl http://glide.local/api/v1/axis` to confirm it stuck. The
+   `Content-Type` header is required — `curl -d` defaults to
+   `application/x-www-form-urlencoded`, which the JSON body handler
+   doesn't recognize as JSON, and the request comes back a plain
+   `Not found` (confirmed on real hardware: this reads as "no handler
+   matched at all," a different failure than an unhandled-but-matched
+   request, which is what a genuinely missing/broken route looks like).
 4. **WebSocket** — `new WebSocket("ws://glide.local/ws")` in a
    browser's dev console (or `websocat ws://glide.local/ws`). Should
    receive a `{"type":"heartbeat",...}` frame every ~5s even with
