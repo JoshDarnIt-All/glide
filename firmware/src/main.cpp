@@ -1021,6 +1021,26 @@ void handleCommand(String line) {
   } else {
     printErr("UNKNOWN_COMMAND");
   }
+
+  // Real bug found on the first hardware test of M4: the WebSocket
+  // "status" push in apiTick() only fires while isActive() (something
+  // is physically moving) -- that's the right call for the ~10Hz
+  // position stream during a move, but it meant SETHOME/SETTRAVEL/
+  // SETSTEPSPERMM (none of which move anything) never told the web UI
+  // they'd happened at all. The Setup screen's checkmarks and progress
+  // bar read homed/travel_set/calibrated from that same WS status
+  // signal, so tapping "Set Home" visibly did nothing even though the
+  // firmware genuinely recorded it (confirmed: a direct curl POST
+  // /home returned {"ok":true} and printed OK on serial the whole
+  // time). Broadcasting once here, unconditionally, after every
+  // command that didn't hit an early `return` above (i.e. every one
+  // that actually took effect) covers every field a client might be
+  // waiting to see change, not just the three this bug was caught on --
+  // cheap and safe to call unconditionally since wsBroadcastStatus()
+  // itself already no-ops when nobody's connected, and this runs at
+  // command-typing/button-tapping frequency, nowhere near the 10Hz
+  // motion stream's own volume.
+  wsBroadcastStatus();
 }
 
 void controlTick(double dtS) {
